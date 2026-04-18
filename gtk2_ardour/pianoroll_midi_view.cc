@@ -352,6 +352,16 @@ PianorollMidiView::swap_automation_channel (int new_channel)
 	}
 }
 
+void
+PianorollMidiView::color_handler()
+{
+	MidiView::color_handler ();
+	AutomationLane* lane = automation_lane_by_param (MidiVelocityAutomation);
+	if (lane) {
+		lane->velocity_display->set_colors ();
+	}
+}
+
 Gtkmm2ext::Color
 PianorollMidiView::line_color_for (Evoral::Parameter const & param)
 {

@@ -112,7 +112,7 @@ class MidiView : public virtual sigc::trackable, public LineMerger
 
 	// inline ARDOUR::ColorMode color_mode() const { return _background->color_mode(); }
 
-	void color_handler ();
+	virtual void color_handler ();
 
 	void show_step_edit_cursor (Temporal::Beats pos);
 	void move_step_edit_cursor (Temporal::Beats pos);

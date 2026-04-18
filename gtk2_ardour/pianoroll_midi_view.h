@@ -96,6 +96,8 @@ class PianorollMidiView : public MidiView
 	XMLNode* automation_state () const;
 	void set_automation_state (XMLNode const &);
 
+	void color_handler ();
+
   protected:
 	bool scroll (GdkEventScroll* ev);
 
