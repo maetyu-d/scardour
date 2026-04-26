@@ -14,11 +14,12 @@
 
 using namespace ARDOUR;
 
-SuperColliderTrack::SuperColliderTrack (Session& sess, std::string name, TrackMode mode)
+SuperColliderTrack::SuperColliderTrack (Session& sess, std::string name, TrackMode mode, OutputMode output_mode)
 	: MidiTrack (sess, name, mode)
-	, _supercollider_source (default_supercollider_source ())
-	, _supercollider_synthdef (default_supercollider_synthdef ())
-	, _supercollider_auto_boot (true)
+	, _supercollider_source (default_supercollider_source (output_mode))
+	, _supercollider_synthdef (default_supercollider_synthdef (output_mode))
+	, _supercollider_auto_boot (output_mode == AudioOutput)
+	, _supercollider_output_mode (output_mode)
 	, _runtime_start_pending (false)
 {
 	_session.SessionLoaded.connect_same_thread (*this, std::bind (&SuperColliderTrack::maybe_start_runtime_after_load, this));
@@ -49,13 +50,21 @@ SuperColliderTrack::set_state (const XMLNode& node, int version)
 	node.get_property (X_("supercollider-source"), _supercollider_source);
 	node.get_property (X_("supercollider-synthdef"), _supercollider_synthdef);
 	node.get_property (X_("supercollider-auto-boot"), _supercollider_auto_boot);
+	std::string output_mode;
+	if (node.get_property (X_("supercollider-output-mode"), output_mode)) {
+		_supercollider_output_mode = parse_output_mode (output_mode);
+	}
 
 	if (_supercollider_source.empty ()) {
-		_supercollider_source = default_supercollider_source ();
+		_supercollider_source = default_supercollider_source (_supercollider_output_mode);
 	}
 
 	if (_supercollider_synthdef.empty ()) {
-		_supercollider_synthdef = default_supercollider_synthdef ();
+		_supercollider_synthdef = default_supercollider_synthdef (_supercollider_output_mode);
+	}
+
+	if (!supports_live_runtime ()) {
+		_supercollider_auto_boot = false;
 	}
 
 	if (MidiTrack::set_state (node, version)) {
@@ -77,14 +86,14 @@ SuperColliderTrack::set_state (const XMLNode& node, int version)
 void
 SuperColliderTrack::set_supercollider_source (std::string const& source)
 {
-	_supercollider_source = source.empty () ? default_supercollider_source () : source;
+	_supercollider_source = source.empty () ? default_supercollider_source (_supercollider_output_mode) : source;
 	refresh_runtime ();
 }
 
 void
 SuperColliderTrack::set_supercollider_synthdef (std::string const& synthdef)
 {
-	_supercollider_synthdef = synthdef.empty () ? default_supercollider_synthdef () : synthdef;
+	_supercollider_synthdef = synthdef.empty () ? default_supercollider_synthdef (_supercollider_output_mode) : synthdef;
 	refresh_timeline_regions ();
 	refresh_runtime ();
 }
@@ -92,7 +101,7 @@ SuperColliderTrack::set_supercollider_synthdef (std::string const& synthdef)
 void
 SuperColliderTrack::set_supercollider_auto_boot (bool yn)
 {
-	_supercollider_auto_boot = yn;
+	_supercollider_auto_boot = supports_live_runtime () && yn;
 	refresh_runtime ();
 }
 
@@ -111,6 +120,11 @@ SuperColliderTrack::supercollider_runtime_path () const
 bool
 SuperColliderTrack::start_supercollider_runtime ()
 {
+	if (!supports_live_runtime ()) {
+		_supercollider_runtime_last_error.clear ();
+		return false;
+	}
+
 	if (!_supercollider_auto_boot) {
 		_supercollider_runtime_last_error.clear ();
 		return false;
@@ -146,6 +160,12 @@ SuperColliderTrack::stop_supercollider_runtime ()
 bool
 SuperColliderTrack::restart_supercollider_runtime ()
 {
+	if (!supports_live_runtime ()) {
+		stop_supercollider_runtime ();
+		_supercollider_runtime_last_error.clear ();
+		return false;
+	}
+
 	if (!_supercollider_auto_boot) {
 		stop_supercollider_runtime ();
 		return false;
@@ -158,7 +178,8 @@ SuperColliderTrack::restart_supercollider_runtime ()
 bool
 SuperColliderTrack::supercollider_runtime_running () const
 {
-	return _supercollider_auto_boot &&
+	return supports_live_runtime () &&
+	       _supercollider_auto_boot &&
 	       _session.supercollider_runtime ().running () &&
 	       _session.supercollider_runtime ().track_active (*this);
 }
@@ -179,12 +200,25 @@ SuperColliderTrack::state (bool save_template) const
 	root.set_property (X_("supercollider-source"), _supercollider_source);
 	root.set_property (X_("supercollider-synthdef"), _supercollider_synthdef);
 	root.set_property (X_("supercollider-auto-boot"), _supercollider_auto_boot);
+	root.set_property (X_("supercollider-output-mode"), output_mode_to_string (_supercollider_output_mode));
 	return root;
 }
 
 std::string
-SuperColliderTrack::default_supercollider_source ()
+SuperColliderTrack::default_supercollider_source (OutputMode output_mode)
 {
+	if (output_mode == MidiOutput) {
+		return
+			"// SuperCollider MIDI generator sketch\n"
+			"// Fill ~ardourMidiNotes with Events using beat positions inside the clip.\n"
+			"~ardourMidiNotes = [\n"
+			"    (start: 0.0, length: 1.0, note: 60, velocity: 100, channel: 0),\n"
+			"    (start: 1.0, length: 1.0, note: 64, velocity: 96, channel: 0),\n"
+			"    (start: 2.0, length: 1.0, note: 67, velocity: 92, channel: 0),\n"
+			"    (start: 3.0, length: 1.0, note: 72, velocity: 104, channel: 0)\n"
+			"];\n";
+	}
+
 	return
 		"// SuperCollider track sketch\n"
 		"SynthDef(\\ArdourSuperColliderTrack, { |out=0, freq=220, amp=0.15|\n"
@@ -200,9 +234,29 @@ SuperColliderTrack::default_supercollider_source ()
 }
 
 std::string
-SuperColliderTrack::default_supercollider_synthdef ()
+SuperColliderTrack::default_supercollider_synthdef (OutputMode output_mode)
 {
+	if (output_mode == MidiOutput) {
+		return "ArdourSuperColliderMidi";
+	}
+
 	return "ArdourSuperColliderTrack";
+}
+
+SuperColliderTrack::OutputMode
+SuperColliderTrack::parse_output_mode (std::string const& output_mode)
+{
+	if (output_mode == "midi") {
+		return MidiOutput;
+	}
+
+	return AudioOutput;
+}
+
+std::string
+SuperColliderTrack::output_mode_to_string (OutputMode output_mode)
+{
+	return output_mode == MidiOutput ? "midi" : "audio";
 }
 
 void
@@ -222,7 +276,10 @@ SuperColliderTrack::refresh_runtime ()
 		return;
 	}
 
-	if (_supercollider_auto_boot) {
+	if (!supports_live_runtime ()) {
+		_supercollider_runtime_last_error.clear ();
+		stop_supercollider_runtime ();
+	} else if (_supercollider_auto_boot) {
 		restart_supercollider_runtime ();
 	} else {
 		_supercollider_runtime_last_error.clear ();
@@ -254,7 +311,8 @@ SuperColliderTrack::refresh_timeline_regions ()
 		return;
 	}
 
-	std::string const clip_name = string_compose (_("SC: %1"), _supercollider_synthdef.empty () ? default_supercollider_synthdef () : _supercollider_synthdef);
+	std::string const clip_prefix = supercollider_generates_midi () ? _("SC MIDI") : _("SC");
+	std::string const clip_name = string_compose ("%1: %2", clip_prefix, _supercollider_synthdef.empty () ? default_supercollider_synthdef (_supercollider_output_mode) : _supercollider_synthdef);
 	pl->foreach_region ([clip_name] (std::shared_ptr<Region> region) {
 		if (!region) {
 			return;

@@ -2922,10 +2922,28 @@ ARDOUR_UI::add_route_dialog_response (int r)
 		ChanCount one_midi_channel;
 		one_midi_channel.set (DataType::MIDI, 1);
 		std::list<std::shared_ptr<SuperColliderTrack> > tracks;
-		tracks = _session->new_supercollider_track (one_midi_channel, one_midi_channel, strict_io, instrument, 0, route_group, count, name_template, order, ARDOUR::Normal, true, trigger_visibility);
+		tracks = _session->new_supercollider_track (one_midi_channel, one_midi_channel, strict_io, instrument, 0, route_group, count, name_template, order, ARDOUR::Normal, true, false, trigger_visibility);
 
 		if (tracks.size() != count) {
 			error << string_compose(P_("could not create %1 new SuperCollider track", "could not create %1 new SuperCollider tracks", count), count) << endmsg;
+		} else if (!tracks.empty ()) {
+			SuperColliderTrackEditor* editor = tracks.front ()->supercollider_editor ();
+			if (!editor) {
+				editor = new SuperColliderTrackEditor (tracks.front ());
+			}
+			editor->open ();
+		}
+		break;
+	}
+	case AddRouteDialog::SuperColliderMidiTrack:
+	{
+		ChanCount one_midi_channel;
+		one_midi_channel.set (DataType::MIDI, 1);
+		std::list<std::shared_ptr<SuperColliderTrack> > tracks;
+		tracks = _session->new_supercollider_track (one_midi_channel, one_midi_channel, strict_io, std::shared_ptr<PluginInfo> (), 0, route_group, count, name_template, order, ARDOUR::Normal, true, true, trigger_visibility);
+
+		if (tracks.size() != count) {
+			error << string_compose(P_("could not create %1 new SuperCollider MIDI track", "could not create %1 new SuperCollider MIDI tracks", count), count) << endmsg;
 		} else if (!tracks.empty ()) {
 			SuperColliderTrackEditor* editor = tracks.front ()->supercollider_editor ();
 			if (!editor) {

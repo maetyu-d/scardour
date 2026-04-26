@@ -822,6 +822,7 @@ public:
 		PresentationInfo::order_t,
 		TrackMode mode,
 		bool input_auto_connect,
+		bool generates_midi = false,
 		bool trigger_visibility = false
 		);
 

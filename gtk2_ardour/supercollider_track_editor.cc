@@ -28,12 +28,17 @@
 
 #include "ardour/audio_track.h"
 #include "ardour/audiofilesource.h"
+#include "ardour/midi_model.h"
+#include "ardour/midi_region.h"
+#include "ardour/midi_source.h"
+#include "ardour/midi_track.h"
 #include "ardour/playlist.h"
 #include "ardour/region.h"
 #include "ardour/region_factory.h"
 #include "ardour/session.h"
 #include "ardour/source_factory.h"
 #include "ardour/session_directory.h"
+#include "ardour/tempo.h"
 
 #include "gui_thread.h"
 #include "public_editor.h"
@@ -186,6 +191,8 @@ SuperColliderTrackEditor::sync_editor ()
 	std::string status_text;
 	if (_dirty) {
 		status_text = _("Runtime status: unsaved changes");
+	} else if (sct->supercollider_generates_midi ()) {
+		status_text = _("Runtime status: MIDI render track");
 	} else if (sct->supercollider_runtime_running ()) {
 		status_text = _("Runtime status: running");
 	} else if (!sct->supercollider_runtime_last_error ().empty ()) {
@@ -199,10 +206,12 @@ SuperColliderTrackEditor::sync_editor ()
 	_updating = true;
 	_synthdef_entry.set_text (sct->supercollider_synthdef ());
 	_auto_boot_button.set_active (sct->supercollider_auto_boot ());
+	_auto_boot_button.set_sensitive (sct->supports_live_runtime ());
 	_source_buffer->set_text (sct->supercollider_source ());
 	_status_label.set_text (status_text);
+	_render_button.set_label (sct->supercollider_generates_midi () ? _("Render To MIDI Track") : _("Render To Timeline"));
 	_apply_button.set_sensitive (_dirty);
-	_restart_button.set_sensitive (sct->supercollider_auto_boot () && sct->supercollider_runtime_available ());
+	_restart_button.set_sensitive (sct->supports_live_runtime () && sct->supercollider_auto_boot () && sct->supercollider_runtime_available ());
 	_render_button.set_sensitive (sct->supercollider_runtime_available ());
 	_updating = false;
 }
@@ -277,6 +286,36 @@ struct RenderClipOutput {
 struct RenderWorkResult {
 	std::vector<RenderClipOutput> clips;
 	std::string failure_reason;
+};
+
+struct MidiRenderClipTask {
+	std::string clip_name;
+	std::string clip_id;
+	timepos_t position;
+	ARDOUR::samplepos_t position_samples;
+	ARDOUR::samplecnt_t length_samples;
+	std::string notes_path;
+	std::string script_path;
+};
+
+struct MidiRenderClipOutput {
+	std::string clip_name;
+	timepos_t position;
+	Temporal::Beats region_length_beats;
+	std::string notes_path;
+};
+
+struct MidiRenderWorkResult {
+	std::vector<MidiRenderClipOutput> clips;
+	std::string failure_reason;
+};
+
+struct MidiRenderNote {
+	double start_beats;
+	double length_beats;
+	int note_number;
+	int velocity;
+	int channel;
 };
 
 std::string
@@ -360,6 +399,57 @@ split_synthdef_prelude (std::string const& source, std::string& prelude, std::st
 	return true;
 }
 
+bool
+parse_sc_midi_notes (std::string const& path, std::vector<MidiRenderNote>& notes, std::string& error)
+{
+	std::ifstream input (path.c_str ());
+	if (!input) {
+		error = _("rendered MIDI note data could not be read");
+		return false;
+	}
+
+	std::string line;
+	unsigned int line_number = 0;
+	while (std::getline (input, line)) {
+		++line_number;
+		if (line.empty ()) {
+			continue;
+		}
+
+		std::vector<std::string> fields;
+		std::string current;
+		for (std::string::const_iterator i = line.begin (); i != line.end (); ++i) {
+			if (*i == '\t') {
+				fields.push_back (current);
+				current.clear ();
+			} else {
+				current += *i;
+			}
+		}
+		fields.push_back (current);
+
+		if (fields.size () != 5) {
+			error = string_compose (_("rendered MIDI note data is malformed on line %1"), line_number);
+			return false;
+		}
+
+		try {
+			MidiRenderNote note;
+			note.start_beats = std::stod (fields[0]);
+			note.length_beats = std::stod (fields[1]);
+			note.note_number = std::stoi (fields[2]);
+			note.velocity = std::stoi (fields[3]);
+			note.channel = std::stoi (fields[4]);
+			notes.push_back (note);
+		} catch (...) {
+			error = string_compose (_("rendered MIDI note data is malformed on line %1"), line_number);
+			return false;
+		}
+	}
+
+	return true;
+}
+
 }
 
 void
@@ -367,6 +457,11 @@ SuperColliderTrackEditor::render_to_timeline ()
 {
 	std::shared_ptr<SuperColliderTrack> sct = std::dynamic_pointer_cast<SuperColliderTrack> (_route);
 	if (!sct) {
+		return;
+	}
+
+	if (sct->supercollider_generates_midi ()) {
+		render_to_midi_track ();
 		return;
 	}
 
@@ -696,6 +791,317 @@ SuperColliderTrackEditor::render_to_timeline ()
 			_status_label.set_text (string_compose (_("Render status: placed %1 rendered clip(s) on %2"), rendered, render_track->name ()));
 			_apply_button.set_sensitive (_dirty);
 			_restart_button.set_sensitive (sct->supercollider_auto_boot () && sct->supercollider_runtime_available ());
+			_render_button.set_sensitive (sct->supercollider_runtime_available ());
+		});
+	}).detach ();
+}
+
+void
+SuperColliderTrackEditor::render_to_midi_track ()
+{
+	std::shared_ptr<SuperColliderTrack> sct = std::dynamic_pointer_cast<SuperColliderTrack> (_route);
+	if (!sct) {
+		return;
+	}
+
+	if (_render_in_progress.exchange (true)) {
+		_status_label.set_text (_("Render status: render already in progress"));
+		return;
+	}
+
+	if (_dirty) {
+		apply_changes ();
+	}
+
+	std::shared_ptr<Playlist> const source_playlist = sct->playlist ();
+	if (!source_playlist) {
+		_render_in_progress = false;
+		_status_label.set_text (_("Render status: no timeline clips to render"));
+		return;
+	}
+
+	std::vector<std::shared_ptr<Region> > clips;
+	source_playlist->foreach_region ([&clips] (std::shared_ptr<Region> region) {
+		if (region) {
+			clips.push_back (region);
+		}
+	});
+
+	if (clips.empty ()) {
+		_render_in_progress = false;
+		_status_label.set_text (_("Render status: add a region to the SuperCollider track timeline first"));
+		return;
+	}
+
+	std::sort (clips.begin (), clips.end (), [] (std::shared_ptr<Region> const& a, std::shared_ptr<Region> const& b) {
+		return a->position_sample () < b->position_sample ();
+	});
+
+	std::string const runtime_path = sct->supercollider_runtime_path ();
+	if (runtime_path.empty ()) {
+		_render_in_progress = false;
+		_status_label.set_text (_("Render status: sclang not found"));
+		return;
+	}
+
+	Session& session = sct->session ();
+	Temporal::TempoMap::SharedPtr const tempo_map = Temporal::TempoMap::use ();
+	std::string const sound_path = session.session_directory ().sound_path ();
+	std::string const track_id = sct->id ().to_s ();
+	std::string const track_name = sct->name ();
+	std::string const pattern_name = sct->supercollider_synthdef ();
+	std::string const source = sct->supercollider_source ();
+
+	std::vector<MidiRenderClipTask> render_tasks;
+	for (std::vector<std::shared_ptr<Region> >::const_iterator i = clips.begin (); i != clips.end (); ++i) {
+		std::shared_ptr<Region> const clip = *i;
+		if (clip->length_samples () == 0) {
+			continue;
+		}
+
+		std::string const base_name = string_compose ("scardour-midi-%1-%2", track_id, clip->id ().to_s ());
+		MidiRenderClipTask task;
+		task.clip_name = clip->name ();
+		task.clip_id = clip->id ().to_s ();
+		task.position = clip->position ();
+		task.position_samples = clip->position_sample ();
+		task.length_samples = clip->length_samples ();
+		task.notes_path = Glib::build_filename (sound_path, base_name + ".notes");
+		task.script_path = Glib::build_filename (sound_path, base_name + ".scd");
+		render_tasks.push_back (task);
+	}
+
+	if (render_tasks.empty ()) {
+		_render_in_progress = false;
+		_status_label.set_text (_("Render status: no non-empty clips to render"));
+		return;
+	}
+
+	std::string const render_track_name = string_compose (_("%1 MIDI Render"), sct->name ());
+	_status_label.set_text (string_compose (_("Render status: rendering %1 clip(s) to MIDI..."), render_tasks.size ()));
+	_apply_button.set_sensitive (false);
+	_restart_button.set_sensitive (false);
+	_render_button.set_sensitive (false);
+
+	std::thread ([this, render_tasks, runtime_path, track_id, track_name, pattern_name, source, render_track_name, tempo_map] () {
+		std::shared_ptr<MidiRenderWorkResult> result (new MidiRenderWorkResult);
+
+		for (std::vector<MidiRenderClipTask>::const_iterator i = render_tasks.begin (); i != render_tasks.end (); ++i) {
+			std::ofstream script (i->script_path.c_str (), std::ios::out | std::ios::trunc);
+			if (!script) {
+				result->failure_reason = _("could not write SuperCollider MIDI render script");
+				break;
+			}
+
+			script
+				<< "(\n"
+				<< "var outputPath = " << sc_string_literal (i->notes_path) << ";\n"
+				<< "var notes;\n"
+				<< "var eventValue = { |event, symbolKey, stringKey, fallback|\n"
+				<< "    var value = event[symbolKey];\n"
+				<< "    if (value.isNil) { value = event.at(stringKey); };\n"
+				<< "    if (value.isNil) { value = fallback; };\n"
+				<< "    value;\n"
+				<< "};\n"
+				<< "~ardourTrackId = " << sc_string_literal (track_id) << ";\n"
+				<< "~ardourTrackName = " << sc_string_literal (track_name) << ";\n"
+				<< "~ardourSynthDef = " << sc_string_literal (pattern_name) << ";\n"
+				<< "~ardourRegionId = " << sc_string_literal (i->clip_id) << ";\n"
+				<< "~ardourRegionName = " << sc_string_literal (i->clip_name) << ";\n"
+				<< "~ardourMidiNotes = List.new;\n"
+				<< source << "\n"
+				<< "notes = ~ardourMidiNotes ? Array.new;\n"
+				<< "File.use(outputPath, \"w\", { |file|\n"
+				<< "    notes.do({ |event|\n"
+				<< "        var start = eventValue.(event, \\start, \"start\", eventValue.(event, \\time, \"time\", 0)).asFloat;\n"
+				<< "        var length = eventValue.(event, \\length, \"length\", eventValue.(event, \\dur, \"dur\", 0.25)).asFloat.max(0.001);\n"
+				<< "        var note = eventValue.(event, \\note, \"note\", eventValue.(event, \\pitch, \"pitch\", 60)).asInteger.clip(0, 127);\n"
+				<< "        var velocity = eventValue.(event, \\velocity, \"velocity\", eventValue.(event, \\vel, \"vel\", 100)).asInteger.clip(1, 127);\n"
+				<< "        var channel = eventValue.(event, \\channel, \"channel\", 0).asInteger.clip(0, 15);\n"
+				<< "        file.write(\"%\\t%\\t%\\t%\\t%\\n\".format(start, length, note, velocity, channel));\n"
+				<< "    });\n"
+				<< "});\n"
+				<< "0.exit;\n"
+				<< ")\n";
+
+			script.close ();
+
+			gchar* argv[] = {
+				g_strdup (runtime_path.c_str ()),
+				g_strdup (i->script_path.c_str ()),
+				0
+			};
+			gchar* standard_output = 0;
+			gchar* standard_error = 0;
+			gint exit_status = 0;
+			GError* error = 0;
+
+			bool const ok = g_spawn_sync (
+				0,
+				argv,
+				0,
+				G_SPAWN_SEARCH_PATH,
+				0,
+				0,
+				&standard_output,
+				&standard_error,
+				&exit_status,
+				&error
+			);
+
+			g_free (argv[0]);
+			g_free (argv[1]);
+
+			if (!ok || exit_status != 0 || !g_file_test (i->notes_path.c_str (), G_FILE_TEST_EXISTS)) {
+				result->failure_reason = _("SuperCollider MIDI render failed");
+				if (error && error->message) {
+					result->failure_reason = error->message;
+				} else if (standard_error && *standard_error) {
+					result->failure_reason = standard_error;
+				}
+			} else {
+				MidiRenderClipOutput output;
+				output.clip_name = i->clip_name;
+				output.position = i->position;
+				output.notes_path = i->notes_path;
+				Temporal::Beats const start_beats = tempo_map->quarters_at (timepos_t (i->position_samples));
+				Temporal::Beats const end_beats = tempo_map->quarters_at (timepos_t (i->position_samples + i->length_samples));
+				output.region_length_beats = end_beats - start_beats;
+				result->clips.push_back (output);
+			}
+
+			if (error) {
+				g_error_free (error);
+			}
+			g_free (standard_output);
+			g_free (standard_error);
+
+			if (!result->failure_reason.empty ()) {
+				break;
+			}
+		}
+
+		Gtkmm2ext::UI::instance()->call_slot (invalidator (*this), [this, result, render_track_name] () {
+			_render_in_progress = false;
+
+			std::shared_ptr<SuperColliderTrack> sct = std::dynamic_pointer_cast<SuperColliderTrack> (_route);
+			if (!sct) {
+				return;
+			}
+
+			Session& session = sct->session ();
+			std::shared_ptr<MidiTrack> render_track = std::dynamic_pointer_cast<MidiTrack> (session.route_by_name (render_track_name));
+
+			if (!render_track) {
+				ChanCount one_midi_channel;
+				one_midi_channel.set (DataType::MIDI, 1);
+				std::list<std::shared_ptr<MidiTrack> > tracks = session.new_midi_track (one_midi_channel, one_midi_channel, false, std::shared_ptr<PluginInfo> (), 0, std::shared_ptr<RouteGroup> (), 1, render_track_name, PresentationInfo::max_order, Normal, true, false);
+				if (tracks.empty ()) {
+					_status_label.set_text (_("Render status: could not create companion MIDI track"));
+					_apply_button.set_sensitive (_dirty);
+					_restart_button.set_sensitive (sct->supports_live_runtime () && sct->supercollider_auto_boot () && sct->supercollider_runtime_available ());
+					_render_button.set_sensitive (sct->supercollider_runtime_available ());
+					return;
+				}
+
+				render_track = tracks.front ();
+			}
+
+			std::shared_ptr<Playlist> const render_playlist = render_track->playlist ();
+			if (!render_playlist) {
+				_status_label.set_text (_("Render status: companion MIDI track has no playlist"));
+				_apply_button.set_sensitive (_dirty);
+				_restart_button.set_sensitive (sct->supports_live_runtime () && sct->supercollider_auto_boot () && sct->supercollider_runtime_available ());
+				_render_button.set_sensitive (sct->supercollider_runtime_available ());
+				return;
+			}
+
+			unsigned int rendered = 0;
+			bool command_started = false;
+
+			for (std::vector<MidiRenderClipOutput>::const_iterator i = result->clips.begin (); i != result->clips.end (); ++i) {
+				std::vector<MidiRenderNote> notes;
+				std::string parse_error;
+				if (!parse_sc_midi_notes (i->notes_path, notes, parse_error)) {
+					result->failure_reason = parse_error;
+					break;
+				}
+
+				Temporal::Beats region_length = i->region_length_beats;
+				for (std::vector<MidiRenderNote>::const_iterator note = notes.begin (); note != notes.end (); ++note) {
+					Temporal::Beats const note_end = Temporal::Beats::from_double (note->start_beats + note->length_beats);
+					if (note_end > region_length) {
+						region_length = note_end;
+					}
+				}
+
+				std::shared_ptr<MidiSource> ms = session.create_midi_source_for_session (string_compose ("%1 MIDI", sct->name ()));
+				if (!ms) {
+					result->failure_reason = _("could not create MIDI source for rendered notes");
+					break;
+				}
+
+				if (!command_started) {
+					PublicEditor::instance ().begin_reversible_command (_("Render SuperCollider To MIDI Track"));
+					command_started = true;
+				}
+
+				std::shared_ptr<MidiModel> mm = ms->model ();
+				MidiModel::NoteDiffCommand* midicmd = mm->new_note_diff_command (_("Render SuperCollider MIDI"));
+				for (std::vector<MidiRenderNote>::const_iterator note = notes.begin (); note != notes.end (); ++note) {
+					uint8_t const channel = static_cast<uint8_t> (std::max (0, std::min (15, note->channel)));
+					uint8_t const note_number = static_cast<uint8_t> (std::max (0, std::min (127, note->note_number)));
+					uint8_t const velocity = static_cast<uint8_t> (std::max (1, std::min (127, note->velocity)));
+					midicmd->add (std::shared_ptr<Evoral::Note<Temporal::Beats> > (new Evoral::Note<Temporal::Beats> (channel, Temporal::Beats::from_double (note->start_beats), Temporal::Beats::from_double (note->length_beats), note_number, velocity)));
+				}
+				mm->apply_diff_command_as_subcommand (session, midicmd);
+
+				{
+					MidiSource::WriterLock lock (ms->mutex ());
+					mm->write_to (ms, lock);
+					ms->load_model (lock);
+				}
+
+				PBD::PropertyList plist;
+				plist.add (ARDOUR::Properties::start, Temporal::Beats ());
+				plist.add (ARDOUR::Properties::length, region_length);
+				plist.add (ARDOUR::Properties::name, string_compose (_("SC MIDI Render: %1"), i->clip_name));
+				plist.add (ARDOUR::Properties::layer, 0);
+				plist.add (ARDOUR::Properties::whole_file, true);
+				plist.add (ARDOUR::Properties::external, false);
+				plist.add (ARDOUR::Properties::opaque, true);
+
+				std::shared_ptr<Region> const rendered_region = RegionFactory::create (ms, plist);
+				render_playlist->clear_changes ();
+				render_playlist->clear_owned_changes ();
+				render_playlist->add_region (rendered_region, i->position);
+				render_playlist->rdiff_and_add_command (&session);
+				++rendered;
+			}
+
+			if (command_started) {
+				if (rendered > 0) {
+					PublicEditor::instance ().commit_reversible_command ();
+				} else {
+					PublicEditor::instance ().abort_reversible_command ();
+				}
+			}
+
+			if (!result->failure_reason.empty ()) {
+				if (rendered > 0) {
+					_status_label.set_text (string_compose (_("Render status: placed %1 rendered MIDI clip(s) on %2 before %3"), rendered, render_track->name (), result->failure_reason));
+				} else {
+					_status_label.set_text (string_compose (_("Render status: %1"), result->failure_reason));
+				}
+				_apply_button.set_sensitive (_dirty);
+				_restart_button.set_sensitive (sct->supports_live_runtime () && sct->supercollider_auto_boot () && sct->supercollider_runtime_available ());
+				_render_button.set_sensitive (sct->supercollider_runtime_available ());
+				return;
+			}
+
+			_status_label.set_text (string_compose (_("Render status: placed %1 rendered MIDI clip(s) on %2"), rendered, render_track->name ()));
+			_apply_button.set_sensitive (_dirty);
+			_restart_button.set_sensitive (sct->supports_live_runtime () && sct->supercollider_auto_boot () && sct->supercollider_runtime_available ());
 			_render_button.set_sensitive (sct->supercollider_runtime_available ());
 		});
 	}).detach ();

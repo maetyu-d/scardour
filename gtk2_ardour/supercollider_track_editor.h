@@ -54,6 +54,7 @@ private:
 	void apply_changes ();
 	void restart_runtime ();
 	void render_to_timeline ();
+	void render_to_midi_track ();
 
 	Gtk::VBox _vbox;
 	Gtk::Label _status_label;

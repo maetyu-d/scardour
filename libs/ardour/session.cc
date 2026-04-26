@@ -2953,6 +2953,7 @@ Session::new_supercollider_track (const ChanCount& input, const ChanCount& outpu
                                   std::shared_ptr<RouteGroup> route_group, uint32_t how_many,
                                   string name_template, PresentationInfo::order_t order,
                                   TrackMode mode, bool input_auto_connect,
+                                  bool generates_midi,
                                   bool trigger_visibility)
 {
 	string track_name;
@@ -2972,7 +2973,7 @@ Session::new_supercollider_track (const ChanCount& input, const ChanCount& outpu
 		std::shared_ptr<SuperColliderTrack> track;
 
 		try {
-			track.reset (new SuperColliderTrack (*this, track_name, mode));
+			track.reset (new SuperColliderTrack (*this, track_name, mode, generates_midi ? SuperColliderTrack::MidiOutput : SuperColliderTrack::AudioOutput));
 
 			if (track->init ()) {
 				goto failed;

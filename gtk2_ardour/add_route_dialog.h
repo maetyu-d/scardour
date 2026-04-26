@@ -70,6 +70,7 @@ public:
 		AudioTrack,
 		MidiTrack,
 		SuperColliderTrack,
+		SuperColliderMidiTrack,
 		AudioBus,
 		MidiBus,
 		VCAMaster,

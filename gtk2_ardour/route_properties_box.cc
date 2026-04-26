@@ -456,6 +456,8 @@ RoutePropertiesBox::sync_supercollider_editor ()
 	std::string status_text;
 	if (_supercollider_dirty) {
 		status_text = _("Runtime status: unsaved changes");
+	} else if (sct->supercollider_generates_midi ()) {
+		status_text = _("Runtime status: MIDI render track");
 	} else if (sct->supercollider_runtime_running ()) {
 		status_text = _("Runtime status: running");
 	} else if (!sct->supercollider_runtime_last_error ().empty ()) {
@@ -469,10 +471,11 @@ RoutePropertiesBox::sync_supercollider_editor ()
 	_updating_supercollider_ui = true;
 	_supercollider_synthdef_entry.set_text (sct->supercollider_synthdef ());
 	_supercollider_auto_boot_button.set_active (sct->supercollider_auto_boot ());
+	_supercollider_auto_boot_button.set_sensitive (sct->supports_live_runtime ());
 	_supercollider_source_buffer->set_text (sct->supercollider_source ());
 	_supercollider_status.set_text (status_text);
 	_supercollider_apply_button.set_sensitive (_supercollider_dirty);
-	_supercollider_restart_button.set_sensitive (sct->supercollider_auto_boot () && sct->supercollider_runtime_available ());
+	_supercollider_restart_button.set_sensitive (sct->supports_live_runtime () && sct->supercollider_auto_boot () && sct->supercollider_runtime_available ());
 	_updating_supercollider_ui = false;
 	_supercollider_frame.show_all ();
 }

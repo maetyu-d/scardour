@@ -138,6 +138,16 @@ AddRouteDialog::AddRouteDialog ()
 		     "\n" + _("If SuperColliderAU is not installed or scanned yet, track creation will stop with a warning.")
 		     );
 
+		builtin_types.emplace_back(_("SuperCollider MIDI Tracks"), std::string () +
+		     _("Use these settings to create one or more SuperCollider MIDI generator tracks.") + "\n\n" +
+		     _("These tracks use SuperCollider code to render note data into a companion MIDI track.") + "\n\n" +
+		     _("You may select:") + "\n" +
+		     "* " + _("The number of tracks to add") + "\n" +
+		     "* " + _("A name for the track(s)") + "\n" +
+		     "* " + _("A group which the track(s) will be assigned to") + "\n" +
+		     "\n" + _("Live audio playback is not used for this track type; use the editor to render MIDI.")
+		     );
+
 		builtin_types.emplace_back(_("Audio Busses"), std::string () +
 		     _("Use these settings to create one or more audio busses.") + "\n\n" +
 		     _("You may select:") + "\n" +
@@ -603,6 +613,8 @@ AddRouteDialog::type_wanted()
 		return MidiTrack;
 	} else if (str == _("SuperCollider Tracks")) {
 		return SuperColliderTrack;
+	} else if (str == _("SuperCollider MIDI Tracks")) {
+		return SuperColliderMidiTrack;
 	} else if (str == _("Audio Tracks")) {
 		return AudioTrack;
 	} else if (str == _("VCA Masters")) {
@@ -625,6 +637,8 @@ AddRouteDialog::type_wanted_to_localized_string (AddRouteDialog::TypeWanted type
 			return _("MIDI Tracks");
 		case SuperColliderTrack:
 			return _("SuperCollider Tracks");
+		case SuperColliderMidiTrack:
+			return _("SuperCollider MIDI Tracks");
 		case AudioTrack:
 			return _("Audio Tracks");
 		case VCAMaster:
@@ -654,6 +668,9 @@ AddRouteDialog::maybe_update_name_template_entry ()
 		break;
 	case SuperColliderTrack:
 		name_template_entry.set_text (_("SuperCollider"));
+		break;
+	case SuperColliderMidiTrack:
+		name_template_entry.set_text (_("SuperCollider MIDI"));
 		break;
 	case AudioBus:
 	case MidiBus:
@@ -721,6 +738,7 @@ AddRouteDialog::track_type_chosen ()
 
 		break;
 	case SuperColliderTrack:
+	case SuperColliderMidiTrack:
 
 		configuration_label.set_sensitive (false);
 		channel_combo.set_sensitive (false);
@@ -853,6 +871,7 @@ AddRouteDialog::name_template_is_default () const
 
 	if (n == _("Audio") ||
 	    n == _("MIDI") ||
+	    n == _("SuperCollider MIDI") ||
 	    n == _("Bus") ||
 	    n == _("Foldback") ||
 	    n == VCA::default_name_template()) {
@@ -925,6 +944,7 @@ AddRouteDialog::channels ()
 	case MidiBus:
 	case MidiTrack:
 	case SuperColliderTrack:
+	case SuperColliderMidiTrack:
 		ret.set (DataType::AUDIO, 0);
 		ret.set (DataType::MIDI, 1);
 		break;
