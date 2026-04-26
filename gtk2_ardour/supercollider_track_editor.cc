@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <signal.h>
@@ -29,6 +30,7 @@
 #include <vector>
 
 #include <glib.h>
+#include <ydk/gdkkeysyms.h>
 
 #include "ardour/audio_track.h"
 #include "ardour/audiofilesource.h"
@@ -45,11 +47,14 @@
 #include "ardour/tempo.h"
 
 #include "gui_thread.h"
+#include "gtkmm2ext/colors.h"
 #include "editor.h"
+#include "ardour_message.h"
 #include "public_editor.h"
 #include "region_view.h"
 #include "supercollider_track_editor.h"
 #include "ui_config.h"
+#include "utils.h"
 
 #include "pbd/i18n.h"
 
@@ -61,42 +66,118 @@ SuperColliderTrackEditor::SuperColliderTrackEditor (std::shared_ptr<Route> route
 	, _auto_synthdef_button (_("Auto-fill from source"))
 	, _auto_boot_button (_("Auto-start runtime"))
 	, _apply_button (_("Apply"))
+	, _revert_button (_("Revert"))
 	, _restart_button (_("Restart"))
 	, _render_button (_("Render To Timeline"))
+	, _insert_template_button (_("Insert Template"))
+	, _load_button (_("Load .sc"))
+	, _save_button (_("Save .sc"))
+	, _search_label (_("Find"))
+	, _find_prev_button (_("Previous"))
+	, _find_next_button (_("Next"))
+	, _goto_label (_("Go to line"))
+	, _goto_button (_("Jump"))
 	, _updating (false)
 	, _dirty (false)
 	, _render_in_progress (false)
 {
 	const float scale = std::max (1.f, UIConfiguration::instance ().get_ui_scale ());
-	set_default_size (620 * scale, 420 * scale);
+	Gdk::Color const editor_bg = Gtkmm2ext::gdk_color_from_rgba (UIConfiguration::instance ().color ("gtk_bases"));
+	Gdk::Color const editor_fg = Gtkmm2ext::gdk_color_from_rgba (UIConfiguration::instance ().color ("gtk_foreground"));
+	Gdk::Color const gutter_fg = Gtkmm2ext::gdk_color_from_rgba (UIConfiguration::instance ().color ("neutral:foreground2"));
+	Gdk::Color const selection_bg = Gtkmm2ext::gdk_color_from_rgba (UIConfiguration::instance ().color ("gtk_bg_selected"));
+	Gdk::Color const selection_fg = Gtkmm2ext::gdk_color_from_rgba (UIConfiguration::instance ().color ("gtk_fg_selected"));
+	set_default_size (760 * scale, 520 * scale);
 
 	add (_vbox);
 	_vbox.set_spacing (8);
 	_status_label.set_alignment (0.0, 0.5);
 	_synthdef_label.set_alignment (0.0, 0.5);
 	_controls_box.set_spacing (6);
+	_editor_tools_box.set_spacing (6);
+	_search_box.set_spacing (6);
+	_editor_box.set_spacing (0);
+	_footer_box.set_spacing (12);
 	_source_buffer = Gtk::TextBuffer::create ();
+	_line_number_buffer = Gtk::TextBuffer::create ();
 	_source_view.set_buffer (_source_buffer);
+	_line_number_view.set_buffer (_line_number_buffer);
 	_source_view.set_editable (true);
 	_source_view.set_cursor_visible (true);
-	_source_view.set_wrap_mode (Gtk::WRAP_WORD_CHAR);
+	_source_view.set_wrap_mode (Gtk::WRAP_NONE);
 	_source_view.set_can_focus (true);
 	_source_view.set_sensitive (true);
-	_source_view.set_size_request (480 * scale, 240 * scale);
+	_source_view.set_size_request (620 * scale, 320 * scale);
+	_source_view.modify_font (UIConfiguration::instance ().get_NormalMonospaceFont ());
+	_source_view.modify_base (Gtk::STATE_NORMAL, editor_bg);
+	_source_view.modify_text (Gtk::STATE_NORMAL, editor_fg);
+	_source_view.modify_base (Gtk::STATE_SELECTED, selection_bg);
+	_source_view.modify_text (Gtk::STATE_SELECTED, selection_fg);
+	_line_number_view.set_editable (false);
+	_line_number_view.set_cursor_visible (false);
+	_line_number_view.set_wrap_mode (Gtk::WRAP_NONE);
+	_line_number_view.set_can_focus (false);
+	_line_number_view.set_sensitive (false);
+	_line_number_view.set_justification (Gtk::JUSTIFY_RIGHT);
+	_line_number_view.modify_font (UIConfiguration::instance ().get_NormalMonospaceFont ());
+	_line_number_view.modify_base (Gtk::STATE_NORMAL, editor_bg);
+	_line_number_view.modify_text (Gtk::STATE_NORMAL, gutter_fg);
+	_line_number_view.modify_base (Gtk::STATE_SELECTED, editor_bg);
+	_line_number_view.modify_text (Gtk::STATE_SELECTED, gutter_fg);
+	_line_number_view.set_size_request (56 * scale, -1);
+	_line_number_scroller.set_policy (Gtk::POLICY_NEVER, Gtk::POLICY_NEVER);
+	_line_number_scroller.set_shadow_type (Gtk::SHADOW_IN);
+	_line_number_scroller.add (_line_number_view);
 	_source_scroller.set_policy (Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC);
 	_source_scroller.add (_source_view);
+	_line_number_scroller.set_vadjustment (*_source_scroller.get_vadjustment ());
+	_scope_label.set_alignment (0.0, 0.5);
+	_cursor_status_label.set_alignment (0.0, 0.5);
+	_shortcut_status_label.set_alignment (1.0, 0.5);
+	_shortcut_status_label.set_text (_("Shortcuts: Save, Find, Next/Prev, Restart"));
+	_template_combo.append_text (_("Audio Synth Template"));
+	_template_combo.append_text (_("Audio Pattern Template"));
+	_template_combo.append_text (_("MIDI Note List Template"));
+	_template_combo.append_text (_("Live MIDI Helper Template"));
+	_template_combo.set_active (0);
+	_search_entry.set_width_chars (18);
+	_goto_entry.set_width_chars (6);
 
 	_controls_box.pack_start (_synthdef_label, false, false);
 	_controls_box.pack_start (_synthdef_entry, true, true);
 	_controls_box.pack_start (_auto_synthdef_button, false, false);
 	_controls_box.pack_start (_auto_boot_button, false, false);
 	_controls_box.pack_start (_apply_button, false, false);
+	_controls_box.pack_start (_revert_button, false, false);
 	_controls_box.pack_start (_restart_button, false, false);
 	_controls_box.pack_start (_render_button, false, false);
 
+	_editor_tools_box.pack_start (_scope_label, true, true);
+	_editor_tools_box.pack_start (_template_combo, false, false);
+	_editor_tools_box.pack_start (_insert_template_button, false, false);
+	_editor_tools_box.pack_start (_load_button, false, false);
+	_editor_tools_box.pack_start (_save_button, false, false);
+
+	_search_box.pack_start (_search_label, false, false);
+	_search_box.pack_start (_search_entry, false, false);
+	_search_box.pack_start (_find_prev_button, false, false);
+	_search_box.pack_start (_find_next_button, false, false);
+	_search_box.pack_start (_goto_label, false, false);
+	_search_box.pack_start (_goto_entry, false, false);
+	_search_box.pack_start (_goto_button, false, false);
+
+	_editor_box.pack_start (_line_number_scroller, false, false);
+	_editor_box.pack_start (_source_scroller, true, true);
+
+	_footer_box.pack_start (_cursor_status_label, true, true);
+	_footer_box.pack_start (_shortcut_status_label, true, true);
+
 	_vbox.pack_start (_status_label, false, false);
 	_vbox.pack_start (_controls_box, false, false);
-	_vbox.pack_start (_source_scroller, true, true);
+	_vbox.pack_start (_editor_tools_box, false, false);
+	_vbox.pack_start (_search_box, false, false);
+	_vbox.pack_start (_editor_box, true, true);
+	_vbox.pack_start (_footer_box, false, false);
 
 	assert (route);
 	_route = route;
@@ -109,8 +190,44 @@ SuperColliderTrackEditor::SuperColliderTrackEditor (std::shared_ptr<Route> route
 	_auto_synthdef_button.signal_toggled ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::source_or_autofill_changed));
 	_auto_boot_button.signal_toggled ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::mark_dirty));
 	_apply_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::apply_changes));
+	_revert_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::revert_changes));
 	_restart_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::restart_runtime));
 	_render_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::render_to_timeline));
+	_insert_template_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::insert_template));
+	_load_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::load_source_from_file));
+	_save_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::save_source_to_file));
+	_find_next_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::find_next));
+	_find_prev_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::find_previous));
+	_search_entry.signal_activate ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::find_next));
+	_goto_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::goto_line));
+	_goto_entry.signal_activate ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::goto_line));
+	_source_view.signal_key_press_event ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::editor_key_press), false);
+	_source_buffer->signal_mark_set ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::cursor_moved));
+	{
+		Glib::RefPtr<Gtk::TextBuffer::Tag> tag;
+		tag = _source_buffer->create_tag ("sc-comment");
+		tag->property_foreground() = "#8fa1b3";
+		tag->property_style() = Pango::STYLE_ITALIC;
+		tag = _source_buffer->create_tag ("sc-string");
+		tag->property_foreground() = "#98c379";
+		tag = _source_buffer->create_tag ("sc-keyword");
+		tag->property_foreground() = "#61afef";
+		tag->property_weight() = Pango::WEIGHT_BOLD;
+		tag = _source_buffer->create_tag ("sc-symbol");
+		tag->property_foreground() = "#c678dd";
+		tag = _source_buffer->create_tag ("sc-number");
+		tag->property_foreground() = "#d19a66";
+		tag = _source_buffer->create_tag ("sc-env");
+		tag->property_foreground() = "#e06c75";
+		tag = _source_buffer->create_tag ("sc-class");
+		tag->property_foreground() = "#56b6c2";
+		tag = _source_buffer->create_tag ("sc-paren-match");
+		tag->property_background() = "#3e4451";
+		tag->property_background_full_height() = true;
+		tag = _source_buffer->create_tag ("sc-current-line");
+		tag->property_background() = "#252b36";
+		tag->property_background_full_height() = true;
+	}
 	Editor* editor = dynamic_cast<Editor*> (&PublicEditor::instance ());
 	if (editor) {
 		editor->get_selection ().RegionsChanged.connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::region_selection_changed));
@@ -120,6 +237,7 @@ SuperColliderTrackEditor::SuperColliderTrackEditor (std::shared_ptr<Route> route
 	set_position (UIConfiguration::instance ().get_default_window_position ());
 	sync_editor ();
 	update_title ();
+	update_cursor_status ();
 }
 
 SuperColliderTrackEditor::~SuperColliderTrackEditor ()
@@ -246,6 +364,104 @@ SuperColliderTrackEditor::selected_region () const
 	return match;
 }
 
+namespace {
+
+std::string
+read_text_file (std::string const& path)
+{
+	std::ifstream input (path.c_str (), std::ios::in | std::ios::binary);
+	if (!input) {
+		return std::string ();
+	}
+
+	return std::string ((std::istreambuf_iterator<char> (input)), std::istreambuf_iterator<char> ());
+}
+
+bool
+write_text_file (std::string const& path, std::string const& contents)
+{
+	std::ofstream output (path.c_str (), std::ios::out | std::ios::binary | std::ios::trunc);
+	if (!output) {
+		return false;
+	}
+
+	output << contents;
+	return output.good ();
+}
+
+std::string
+supercollider_template_source (bool midi, int index)
+{
+	if (midi) {
+		switch (index) {
+		case 2:
+			return
+				"~ardourMidiNotes = [\n"
+				"    (start: 0.0, length: 0.5, note: 60, velocity: 100, channel: 0),\n"
+				"    (start: 0.5, length: 0.5, note: 64, velocity: 100, channel: 0),\n"
+				"    (start: 1.0, length: 0.5, note: 67, velocity: 100, channel: 0),\n"
+				"    (start: 1.5, length: 0.5, note: 72, velocity: 110, channel: 0)\n"
+				"];\n";
+		case 3:
+			return
+				"Routine({\n"
+				"    var notes = [60, 64, 67, 72, 67, 64, 60];\n"
+				"    notes.do({ |note, i|\n"
+				"        ~ardourNoteOn.value(note, 96 + (i * 4), 0);\n"
+				"        0.35.wait;\n"
+				"        ~ardourNoteOff.value(note, 0, 0);\n"
+				"        0.15.wait;\n"
+				"    });\n"
+				"}).play;\n";
+		default:
+			break;
+		}
+	} else {
+		switch (index) {
+		case 0:
+			return
+				"SynthDef(\\scardourTone, { |out=0, freq=220, amp=0.15|\n"
+				"    var env = EnvGen.kr(Env.asr(0.01, 1, 0.2), 1, doneAction: 0);\n"
+				"    var sig = SinOsc.ar(freq) * amp * env;\n"
+				"    Out.ar(out, sig ! 2);\n"
+				"}).add;\n\n"
+				"~ardourTrackGroup = ~ardourTrackGroup ?? { Group.tail(s) };\n"
+				"~tone = Synth.tail(~ardourTrackGroup, \\scardourTone, [\\freq, 220, \\amp, 0.15]);\n";
+		case 1:
+			return
+				"SynthDef(\\gabPulse, { |out=0, freq=55, amp=0.2, decay=0.18|\n"
+				"    var env = EnvGen.kr(Env.perc(0.001, decay), doneAction: 2);\n"
+				"    var sig = (Saw.ar(freq * [1, 1.005]) * env * amp).tanh;\n"
+				"    Out.ar(out, sig);\n"
+				"}).add;\n\n"
+				"~renderPlayer = Pbind(\n"
+				"    \\instrument, \\gabPulse,\n"
+				"    \\dur, 0.25,\n"
+				"    \\freq, Pseq([55, 82.5, 110, 82.5], inf),\n"
+				"    \\amp, 0.18\n"
+				").play;\n";
+		default:
+			break;
+		}
+	}
+
+	return std::string ();
+}
+
+bool
+has_primary_modifier (guint state)
+{
+	return (state & GDK_CONTROL_MASK) || (state & GDK_META_MASK);
+}
+
+bool
+is_identifier_char (char c)
+{
+	return std::isalnum (static_cast<unsigned char> (c)) || c == '_';
+}
+
+} // namespace
+
 void
 SuperColliderTrackEditor::sync_editor ()
 {
@@ -296,9 +512,15 @@ SuperColliderTrackEditor::sync_editor ()
 	_status_label.set_text (status_text);
 	_render_button.set_label (sct->supercollider_generates_midi () ? _("Render To MIDI Track") : _("Render To Timeline"));
 	_apply_button.set_sensitive (_dirty);
+	_revert_button.set_sensitive (_dirty);
 	_restart_button.set_sensitive (sct->supports_live_runtime () && sct->supercollider_auto_boot () && sct->supercollider_runtime_available ());
 	_render_button.set_sensitive (sct->supercollider_runtime_available ());
 	_updating = false;
+	update_scope_label ();
+	update_line_numbers ();
+	update_syntax_highlighting ();
+	update_current_line_highlight ();
+	update_cursor_status ();
 }
 
 void
@@ -315,6 +537,7 @@ SuperColliderTrackEditor::mark_dirty ()
 	_dirty = true;
 	_status_label.set_text (_("Runtime status: unsaved changes"));
 	_apply_button.set_sensitive (true);
+	_revert_button.set_sensitive (true);
 }
 
 void
@@ -341,7 +564,464 @@ SuperColliderTrackEditor::source_or_autofill_changed ()
 		_synthdef_entry.set_sensitive (true);
 	}
 
+	update_line_numbers ();
+	update_syntax_highlighting ();
+	update_current_line_highlight ();
 	mark_dirty ();
+}
+
+void
+SuperColliderTrackEditor::update_scope_label ()
+{
+	std::shared_ptr<ARDOUR::Region> const region = selected_region ();
+	if (region) {
+		_scope_label.set_text (string_compose (_("Editing selected clip: %1"), region->name ()));
+	} else if (_route) {
+		_scope_label.set_text (string_compose (_("Editing track default for: %1"), _route->name ()));
+	} else {
+		_scope_label.set_text (_("Editing SuperCollider source"));
+	}
+}
+
+void
+SuperColliderTrackEditor::update_cursor_status ()
+{
+	if (!_source_buffer) {
+		return;
+	}
+
+	Gtk::TextBuffer::iterator const iter = _source_buffer->get_iter_at_mark (_source_buffer->get_insert ());
+	std::string const text = _source_buffer->get_text ();
+	int lines = 1;
+	for (std::string::const_iterator i = text.begin (); i != text.end (); ++i) {
+		if (*i == '\n') {
+			++lines;
+		}
+	}
+
+	_cursor_status_label.set_text (string_compose (_("Ln %1, Col %2    %3 lines, %4 chars"),
+		iter.get_line () + 1,
+		iter.get_line_offset () + 1,
+		lines,
+		text.length ()));
+
+	if (_source_buffer) {
+		Glib::RefPtr<Gtk::TextBuffer::Tag> const match_tag = _source_buffer->get_tag_table ()->lookup ("sc-paren-match");
+		if (match_tag) {
+			_source_buffer->remove_tag (match_tag, _source_buffer->begin (), _source_buffer->end ());
+		}
+
+		int const offset = iter.get_offset ();
+		if (offset > 0 && offset <= static_cast<int> (text.length ())) {
+			char const c = text[offset - 1];
+			char match = 0;
+			int direction = 0;
+			if (c == '(') { match = ')'; direction = 1; }
+			else if (c == '[') { match = ']'; direction = 1; }
+			else if (c == '{') { match = '}'; direction = 1; }
+			else if (c == ')') { match = '('; direction = -1; }
+			else if (c == ']') { match = '['; direction = -1; }
+			else if (c == '}') { match = '{'; direction = -1; }
+
+			if (match && match_tag) {
+				int depth = 0;
+				for (int i = offset - 1; i >= 0 && i < static_cast<int> (text.length ()); i += direction) {
+					char const ch = text[i];
+					if (ch == c) {
+						++depth;
+					} else if (ch == match) {
+						--depth;
+						if (depth == 0) {
+							Gtk::TextBuffer::iterator a = _source_buffer->get_iter_at_offset (offset - 1);
+							Gtk::TextBuffer::iterator b = _source_buffer->get_iter_at_offset (offset);
+							_source_buffer->apply_tag (match_tag, a, b);
+							Gtk::TextBuffer::iterator cstart = _source_buffer->get_iter_at_offset (i);
+							Gtk::TextBuffer::iterator cend = _source_buffer->get_iter_at_offset (i + 1);
+							_source_buffer->apply_tag (match_tag, cstart, cend);
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+void
+SuperColliderTrackEditor::update_line_numbers ()
+{
+	if (!_line_number_buffer || !_source_buffer) {
+		return;
+	}
+
+	std::string const text = _source_buffer->get_text ();
+	int lines = 1;
+	for (std::string::const_iterator i = text.begin (); i != text.end (); ++i) {
+		if (*i == '\n') {
+			++lines;
+		}
+	}
+
+	std::ostringstream out;
+	for (int i = 1; i <= lines; ++i) {
+		out << i;
+		if (i != lines) {
+			out << '\n';
+		}
+	}
+
+	_line_number_buffer->set_text (out.str ());
+}
+
+void
+SuperColliderTrackEditor::update_syntax_highlighting ()
+{
+	if (_updating || !_source_buffer) {
+		return;
+	}
+
+	Glib::RefPtr<Gtk::TextTagTable> const table = _source_buffer->get_tag_table ();
+	if (!table) {
+		return;
+	}
+
+	std::vector<Glib::RefPtr<Gtk::TextBuffer::Tag> > tags;
+	char const* names[] = { "sc-comment", "sc-string", "sc-keyword", "sc-symbol", "sc-number", "sc-env", "sc-class" };
+	for (size_t i = 0; i < sizeof (names) / sizeof (names[0]); ++i) {
+		Glib::RefPtr<Gtk::TextBuffer::Tag> const tag = table->lookup (names[i]);
+		if (tag) {
+			tags.push_back (tag);
+		}
+	}
+
+	Gtk::TextBuffer::iterator const begin = _source_buffer->begin ();
+	Gtk::TextBuffer::iterator const end = _source_buffer->end ();
+	for (std::vector<Glib::RefPtr<Gtk::TextBuffer::Tag> >::const_iterator i = tags.begin (); i != tags.end (); ++i) {
+		_source_buffer->remove_tag (*i, begin, end);
+	}
+
+	static char const* keyword_list[] = {
+		"SynthDef", "Routine", "Pbind", "Pseq", "Ppar", "Env", "EnvGen", "Out", "SinOsc",
+		"Saw", "Pulse", "PlayBuf", "BufRd", "BufWr", "Group", "Synth", "TempoClock", "Task", "Ndef"
+	};
+
+	std::string const text = _source_buffer->get_text ();
+	for (size_t i = 0; i < text.length ();) {
+		if (text[i] == '/' && i + 1 < text.length () && text[i + 1] == '/') {
+			size_t j = i + 2;
+			while (j < text.length () && text[j] != '\n') {
+				++j;
+			}
+			if (Glib::RefPtr<Gtk::TextBuffer::Tag> tag = table->lookup ("sc-comment")) {
+				_source_buffer->apply_tag (tag, _source_buffer->get_iter_at_offset (i), _source_buffer->get_iter_at_offset (j));
+			}
+			i = j;
+			continue;
+		}
+
+		if (text[i] == '"') {
+			size_t j = i + 1;
+			while (j < text.length ()) {
+				if (text[j] == '"' && text[j - 1] != '\\') {
+					++j;
+					break;
+				}
+				++j;
+			}
+			if (Glib::RefPtr<Gtk::TextBuffer::Tag> tag = table->lookup ("sc-string")) {
+				_source_buffer->apply_tag (tag, _source_buffer->get_iter_at_offset (i), _source_buffer->get_iter_at_offset (j));
+			}
+			i = j;
+			continue;
+		}
+
+		if (text[i] == '\\') {
+			size_t j = i + 1;
+			while (j < text.length () && is_identifier_char (text[j])) {
+				++j;
+			}
+			if (Glib::RefPtr<Gtk::TextBuffer::Tag> tag = table->lookup ("sc-symbol")) {
+				_source_buffer->apply_tag (tag, _source_buffer->get_iter_at_offset (i), _source_buffer->get_iter_at_offset (j));
+			}
+			i = j;
+			continue;
+		}
+
+		if (text[i] == '~') {
+			size_t j = i + 1;
+			while (j < text.length () && is_identifier_char (text[j])) {
+				++j;
+			}
+			if (Glib::RefPtr<Gtk::TextBuffer::Tag> tag = table->lookup ("sc-env")) {
+				_source_buffer->apply_tag (tag, _source_buffer->get_iter_at_offset (i), _source_buffer->get_iter_at_offset (j));
+			}
+			i = j;
+			continue;
+		}
+
+		if (std::isdigit (static_cast<unsigned char> (text[i])) || ((text[i] == '-' || text[i] == '+') && i + 1 < text.length () && std::isdigit (static_cast<unsigned char> (text[i + 1])))) {
+			size_t j = i + 1;
+			while (j < text.length () && (std::isdigit (static_cast<unsigned char> (text[j])) || text[j] == '.')) {
+				++j;
+			}
+			if (Glib::RefPtr<Gtk::TextBuffer::Tag> tag = table->lookup ("sc-number")) {
+				_source_buffer->apply_tag (tag, _source_buffer->get_iter_at_offset (i), _source_buffer->get_iter_at_offset (j));
+			}
+			i = j;
+			continue;
+		}
+
+		if (std::isalpha (static_cast<unsigned char> (text[i])) || text[i] == '_') {
+			size_t j = i + 1;
+			while (j < text.length () && is_identifier_char (text[j])) {
+				++j;
+			}
+			std::string const token = text.substr (i, j - i);
+			bool highlighted = false;
+			for (size_t k = 0; k < sizeof (keyword_list) / sizeof (keyword_list[0]); ++k) {
+				if (token == keyword_list[k]) {
+					if (Glib::RefPtr<Gtk::TextBuffer::Tag> tag = table->lookup ("sc-keyword")) {
+						_source_buffer->apply_tag (tag, _source_buffer->get_iter_at_offset (i), _source_buffer->get_iter_at_offset (j));
+					}
+					highlighted = true;
+					break;
+				}
+			}
+			if (!highlighted && std::isupper (static_cast<unsigned char> (token[0]))) {
+				if (Glib::RefPtr<Gtk::TextBuffer::Tag> tag = table->lookup ("sc-class")) {
+					_source_buffer->apply_tag (tag, _source_buffer->get_iter_at_offset (i), _source_buffer->get_iter_at_offset (j));
+				}
+			}
+			i = j;
+			continue;
+		}
+
+		++i;
+	}
+}
+
+void
+SuperColliderTrackEditor::update_current_line_highlight ()
+{
+	if (!_source_buffer) {
+		return;
+	}
+
+	Glib::RefPtr<Gtk::TextBuffer::Tag> const line_tag = _source_buffer->get_tag_table ()->lookup ("sc-current-line");
+	if (!line_tag) {
+		return;
+	}
+
+	_source_buffer->remove_tag (line_tag, _source_buffer->begin (), _source_buffer->end ());
+
+	if (_source_buffer->get_has_selection ()) {
+		return;
+	}
+
+	Gtk::TextBuffer::iterator line_start = _source_buffer->get_iter_at_mark (_source_buffer->get_insert ());
+	line_start.set_line_offset (0);
+	Gtk::TextBuffer::iterator line_end = line_start;
+	if (!line_end.ends_line ()) {
+		line_end.forward_to_line_end ();
+	} else if (!line_end.is_end ()) {
+		line_end.forward_char ();
+	}
+
+	_source_buffer->apply_tag (line_tag, line_start, line_end);
+}
+
+void
+SuperColliderTrackEditor::cursor_moved (const Gtk::TextBuffer::iterator&, const Glib::RefPtr<Gtk::TextBuffer::Mark>&)
+{
+	update_current_line_highlight ();
+	update_cursor_status ();
+}
+
+void
+SuperColliderTrackEditor::revert_changes ()
+{
+	_dirty = false;
+	sync_editor ();
+}
+
+void
+SuperColliderTrackEditor::load_source_from_file ()
+{
+	Gtk::FileChooserDialog dialog (_("Load SuperCollider Source"), Gtk::FILE_CHOOSER_ACTION_OPEN);
+	dialog.add_button (Gtk::Stock::CANCEL, Gtk::RESPONSE_CANCEL);
+	dialog.add_button (Gtk::Stock::OPEN, Gtk::RESPONSE_ACCEPT);
+
+	if (dialog.run () != Gtk::RESPONSE_ACCEPT) {
+		return;
+	}
+
+	std::string const path = dialog.get_filename ();
+	std::string const contents = read_text_file (path);
+	if (contents.empty () && !g_file_test (path.c_str (), G_FILE_TEST_EXISTS)) {
+		ArdourMessageDialog msg (string_compose (_("Could not read SuperCollider source from \"%1\"."), path), false, Gtk::MESSAGE_ERROR, Gtk::BUTTONS_OK, true);
+		msg.run ();
+		return;
+	}
+
+	_source_buffer->set_text (contents);
+	update_line_numbers ();
+	update_syntax_highlighting ();
+	update_current_line_highlight ();
+	update_cursor_status ();
+}
+
+void
+SuperColliderTrackEditor::save_source_to_file ()
+{
+	Gtk::FileChooserDialog dialog (_("Save SuperCollider Source"), Gtk::FILE_CHOOSER_ACTION_SAVE);
+	dialog.add_button (Gtk::Stock::CANCEL, Gtk::RESPONSE_CANCEL);
+	dialog.add_button (Gtk::Stock::SAVE, Gtk::RESPONSE_ACCEPT);
+	dialog.set_do_overwrite_confirmation (true);
+
+	std::shared_ptr<ARDOUR::Region> const region = selected_region ();
+	dialog.set_current_name (region ? region->name () + ".scd" : (_route ? _route->name () + ".scd" : "supercollider.scd"));
+
+	if (dialog.run () != Gtk::RESPONSE_ACCEPT) {
+		return;
+	}
+
+	std::string path = dialog.get_filename ();
+	if (path.find ('.') == std::string::npos) {
+		path += ".scd";
+	}
+
+	if (!write_text_file (path, _source_buffer->get_text ())) {
+		ArdourMessageDialog msg (string_compose (_("Could not save SuperCollider source to \"%1\"."), path), false, Gtk::MESSAGE_ERROR, Gtk::BUTTONS_OK, true);
+		msg.run ();
+	}
+}
+
+void
+SuperColliderTrackEditor::insert_template ()
+{
+	std::shared_ptr<SuperColliderTrack> sct = std::dynamic_pointer_cast<SuperColliderTrack> (_route);
+	if (!sct) {
+		return;
+	}
+
+	std::string const snippet = supercollider_template_source (sct->supercollider_generates_midi (), _template_combo.get_active_row_number ());
+	if (snippet.empty ()) {
+		return;
+	}
+
+	Gtk::TextBuffer::iterator const insert = _source_buffer->get_iter_at_mark (_source_buffer->get_insert ());
+	_source_buffer->insert (insert, (_source_buffer->get_char_count () > 0 ? "\n" : "") + snippet);
+	update_line_numbers ();
+	update_syntax_highlighting ();
+	update_current_line_highlight ();
+	update_cursor_status ();
+}
+
+void
+SuperColliderTrackEditor::goto_line ()
+{
+	if (!_source_buffer) {
+		return;
+	}
+
+	int requested = atoi (_goto_entry.get_text ().c_str ());
+	if (requested < 1) {
+		return;
+	}
+
+	Gtk::TextBuffer::iterator iter = _source_buffer->get_iter_at_line (requested - 1);
+	_source_buffer->place_cursor (iter);
+	_source_view.scroll_to (_source_buffer->get_insert (), 0.2);
+	update_cursor_status ();
+	_source_view.grab_focus ();
+}
+
+void
+SuperColliderTrackEditor::find_next ()
+{
+	std::string const needle = _search_entry.get_text ();
+	if (needle.empty ()) {
+		return;
+	}
+
+	Gtk::TextBuffer::iterator start = _source_buffer->get_iter_at_mark (_source_buffer->get_insert ());
+	Gtk::TextBuffer::iterator match_start;
+	Gtk::TextBuffer::iterator match_end;
+
+	if (!start.forward_search (needle, Gtk::TEXT_SEARCH_TEXT_ONLY, match_start, match_end)) {
+		start = _source_buffer->begin ();
+		if (!start.forward_search (needle, Gtk::TEXT_SEARCH_TEXT_ONLY, match_start, match_end)) {
+			return;
+		}
+	}
+
+	_source_buffer->select_range (match_start, match_end);
+	_source_buffer->place_cursor (match_end);
+	_source_view.scroll_to (_source_buffer->get_insert (), 0.2);
+	update_cursor_status ();
+}
+
+void
+SuperColliderTrackEditor::find_previous ()
+{
+	std::string const needle = _search_entry.get_text ();
+	if (needle.empty ()) {
+		return;
+	}
+
+	Gtk::TextBuffer::iterator start = _source_buffer->get_iter_at_mark (_source_buffer->get_insert ());
+	Gtk::TextBuffer::iterator match_start;
+	Gtk::TextBuffer::iterator match_end;
+
+	if (!start.backward_search (needle, Gtk::TEXT_SEARCH_TEXT_ONLY, match_start, match_end)) {
+		start = _source_buffer->end ();
+		if (!start.backward_search (needle, Gtk::TEXT_SEARCH_TEXT_ONLY, match_start, match_end)) {
+			return;
+		}
+	}
+
+	_source_buffer->select_range (match_start, match_end);
+	_source_buffer->place_cursor (match_start);
+	_source_view.scroll_to (_source_buffer->get_insert (), 0.2);
+	update_cursor_status ();
+}
+
+bool
+SuperColliderTrackEditor::editor_key_press (GdkEventKey* ev)
+{
+	if (!ev) {
+		return false;
+	}
+
+	if (has_primary_modifier (ev->state)) {
+		switch (ev->keyval) {
+		case GDK_KEY_s:
+		case GDK_KEY_S:
+			apply_changes ();
+			return true;
+		case GDK_KEY_r:
+		case GDK_KEY_R:
+			restart_runtime ();
+			return true;
+		case GDK_KEY_f:
+		case GDK_KEY_F:
+			_search_entry.grab_focus ();
+			return true;
+		default:
+			break;
+		}
+	}
+
+	if (ev->keyval == GDK_KEY_F3) {
+		if (ev->state & GDK_SHIFT_MASK) {
+			find_previous ();
+		} else {
+			find_next ();
+		}
+		return true;
+	}
+
+	return false;
 }
 
 void
