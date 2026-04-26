@@ -469,9 +469,17 @@ chmod +x $Frameworks/ardour-util.sh
 # session-utils
 HAVE_SESSION_UTILS=false
 if test -d $BUILD_ROOT/session_utils/; then
-	for file in $BUILD_ROOT/session_utils/${lower_case_appname}${major_version}-*; do
+	session_utils_glob=$BUILD_ROOT/session_utils/${lower_case_appname}${major_version}-*
+	if ! ls $session_utils_glob >/dev/null 2>&1 ; then
+		session_utils_glob=$BUILD_ROOT/session_utils/ardour${major_version}-*
+	fi
+	for file in $session_utils_glob; do
 		BN=$(basename $file)
+		BN=${BN/ardour${major_version}/${lower_case_appname}${major_version}}
 		cp $file $Frameworks/
+		if test "$BN" != "$(basename $file)" ; then
+			mv $Frameworks/$(basename $file) $Frameworks/${BN}
+		fi
 		if test x$STRIP = xall ; then
 			strip -s $Frameworks/${BN}
 		fi
