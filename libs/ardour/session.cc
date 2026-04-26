@@ -65,7 +65,9 @@
 #include "ardour/audio_track.h"
 #include "ardour/audioengine.h"
 #include "ardour/audiofilesource.h"
+#include "ardour/audio_unit.h"
 #include "ardour/auditioner.h"
+#include "ardour/auv2_scan.h"
 #include "ardour/boost_debug.h"
 #include "ardour/buffer_manager.h"
 #include "ardour/buffer_set.h"
@@ -152,6 +154,10 @@
 
 #include "pbd/i18n.h"
 
+#ifdef AUDIOUNIT_SUPPORT
+#include "CAAudioUnit.h"
+#endif
+
 namespace ARDOUR {
 class MidiSource;
 class Processor;
@@ -162,6 +168,87 @@ using namespace std;
 using namespace ARDOUR;
 using namespace PBD;
 using namespace Temporal;
+
+namespace {
+
+bool
+is_supercollider_au (ARDOUR::PluginInfoPtr const& info)
+{
+	if (!info || info->type != ARDOUR::AudioUnit) {
+		return false;
+	}
+
+	std::string const name = PBD::downcase (info->name);
+	std::string const creator = PBD::downcase (info->creator);
+	std::string const unique_id = PBD::downcase (info->unique_id);
+	std::string const category = PBD::downcase (info->category);
+
+	return name == "supercolliderau" ||
+	       name.find ("supercollider") != std::string::npos ||
+	       name.find ("scau") != std::string::npos ||
+	       creator.find ("supercollider") != std::string::npos ||
+	       creator.find ("scau") != std::string::npos ||
+	       unique_id.find ("supercollider") != std::string::npos ||
+	       unique_id.find ("scau") != std::string::npos ||
+	       category.find ("instrument") != std::string::npos ||
+	       category.find ("generator") != std::string::npos;
+}
+
+std::shared_ptr<ARDOUR::PluginInsert>
+find_supercollider_insert (std::shared_ptr<ARDOUR::Route> const& route)
+{
+	if (!route) {
+		return std::shared_ptr<ARDOUR::PluginInsert> ();
+	}
+
+	std::shared_ptr<ARDOUR::PluginInsert> match;
+	route->foreach_processor ([&match](std::weak_ptr<ARDOUR::Processor> wp) {
+		if (match) {
+			return;
+		}
+
+		std::shared_ptr<ARDOUR::Processor> const proc = wp.lock ();
+		std::shared_ptr<ARDOUR::PluginInsert> const pi = std::dynamic_pointer_cast<ARDOUR::PluginInsert> (proc);
+		if (pi && pi->plugin () && is_supercollider_au (pi->plugin ()->get_info ())) {
+			match = pi;
+		}
+	});
+
+	return match;
+}
+
+#ifdef AUDIOUNIT_SUPPORT
+std::shared_ptr<ARDOUR::PluginInfo>
+discover_supercollider_au_direct ()
+{
+	ARDOUR::AUv2DescStr const sc_desc ("aumf-SCAU-SCAU");
+	if (!sc_desc.valid ()) {
+		return std::shared_ptr<ARDOUR::PluginInfo> ();
+	}
+
+	CAComponentDescription desc (sc_desc.desc ());
+	std::shared_ptr<ARDOUR::PluginInfo> match;
+
+	ARDOUR::auv2_scan_and_cache (desc, [&match](CAComponentDescription const& found_desc, ARDOUR::AUv2Info const& nfo) {
+		ARDOUR::AUPluginInfoPtr info (new ARDOUR::AUPluginInfo (
+			std::shared_ptr<CAComponentDescription> (new CAComponentDescription (found_desc))));
+
+		info->unique_id = nfo.id;
+		info->name = nfo.name;
+		info->creator = nfo.creator;
+		info->category = nfo.category;
+		info->version = nfo.version;
+		info->max_outputs = nfo.max_outputs;
+		info->io_configs = nfo.io_configs;
+
+		match = info;
+	}, false);
+
+	return match;
+}
+#endif
+
+}
 
 bool Session::_disable_all_loaded_plugins = false;
 bool Session::_bypass_all_loaded_plugins = false;
@@ -3031,6 +3118,90 @@ Session::new_midi_route (std::shared_ptr<RouteGroup> route_group, uint32_t how_m
 
 	return ret;
 
+}
+
+std::shared_ptr<PluginInfo>
+Session::supercollider_instrument () const
+{
+#ifdef AUDIOUNIT_SUPPORT
+	PluginInfoList const plugins = PluginManager::instance ().au_plugin_info ();
+	for (PluginInfoList::const_iterator i = plugins.begin (); i != plugins.end (); ++i) {
+		if (is_supercollider_au (*i)) {
+			return *i;
+		}
+	}
+
+	return discover_supercollider_au_direct ();
+#endif
+
+	return std::shared_ptr<PluginInfo> ();
+}
+
+bool
+Session::ensure_supercollider_instrument (std::shared_ptr<Route> const& route, bool strict_io, std::string* error_out)
+{
+	if (!route) {
+		if (error_out) {
+			*error_out = "No route available";
+		}
+		return false;
+	}
+
+	std::shared_ptr<PluginInfo> const instrument = supercollider_instrument ();
+	if (!instrument) {
+		if (error_out) {
+			*error_out = "SuperColliderAU was not found in the scanned AudioUnit list";
+		}
+		return false;
+	}
+
+	std::shared_ptr<PluginInsert> const existing_sc = find_supercollider_insert (route);
+	if (existing_sc) {
+		return true;
+	}
+
+	std::shared_ptr<Processor> const current = route->the_instrument ();
+	PluginPtr const plugin = instrument->load (*this);
+	if (!plugin) {
+		if (error_out) {
+			*error_out = string_compose ("AudioUnit load failed for %1 (%2)", instrument->name, instrument->unique_id);
+		}
+		return false;
+	}
+
+	std::shared_ptr<PluginInsert> replacement (new PluginInsert (*this, *route, plugin));
+	if (strict_io) {
+		replacement->set_strict_io (true);
+	}
+
+	Route::ProcessorStreams err;
+	int rv = 0;
+	if (current) {
+		rv = route->replace_processor (current, replacement, &err);
+	} else {
+		rv = route->add_processor (replacement, PreFader, &err, Config->get_new_plugins_active ());
+	}
+
+	if (rv != 0) {
+		if (error_out) {
+			*error_out = string_compose ("Processor insertion failed at index %1 with stream request %2", err.index, err.count);
+		}
+		return false;
+	}
+
+	ChanCount existing_inputs;
+	ChanCount existing_outputs;
+	count_existing_track_channels (existing_inputs, existing_outputs);
+
+	if (!route->instrument_fanned_out ()) {
+		auto_connect_route (route, false, true, ChanCount (), ChanCount (), ChanCount (), existing_outputs);
+	}
+
+	bool const found = static_cast<bool> (find_supercollider_insert (route));
+	if (!found && error_out) {
+		*error_out = "SuperColliderAU was inserted but is not visible in the route processor list";
+	}
+	return found;
 }
 
 

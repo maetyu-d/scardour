@@ -1212,5 +1212,9 @@ AddRouteDialog::route_separator (const Glib::RefPtr<Gtk::TreeModel> &, const Gtk
 PluginInfoPtr
 AddRouteDialog::requested_instrument ()
 {
+	if (_session && type_wanted () == SuperColliderTrack) {
+		return _session->supercollider_instrument ();
+	}
+
 	return instrument_combo.selected_instrument();
 }

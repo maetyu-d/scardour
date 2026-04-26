@@ -116,6 +116,17 @@ SuperColliderTrack::start_supercollider_runtime ()
 		return false;
 	}
 
+	std::shared_ptr<Route> const self = std::dynamic_pointer_cast<Route> (shared_from_this ());
+	std::string attach_error;
+	if (!self || !_session.ensure_supercollider_instrument (self, false, &attach_error)) {
+		if (attach_error.empty ()) {
+			attach_error = _("SuperColliderAU Audio Unit is missing or could not be attached");
+		}
+		_supercollider_runtime_last_error = attach_error;
+		PBD::error << string_compose (_("SuperCollider track '%1' could not attach SuperColliderAU for live playback: %2"), name (), attach_error) << endmsg;
+		return false;
+	}
+
 	if (!_session.supercollider_runtime ().activate_track (*this)) {
 		_supercollider_runtime_last_error = _session.supercollider_runtime ().last_error ();
 		PBD::error << string_compose (_("SuperCollider track '%1' could not join the session runtime: %2"), name (), _supercollider_runtime_last_error) << endmsg;
@@ -176,9 +187,16 @@ SuperColliderTrack::default_supercollider_source ()
 {
 	return
 		"// SuperCollider track sketch\n"
-		"var env = EnvGen.kr(Env.perc(0.01, 1.5), doneAction: 2);\n"
-		"var sig = SinOsc.ar(220 * [1, 1.01], 0, 0.15) * env;\n"
-		"Out.ar(0, sig);\n";
+		"SynthDef(\\ArdourSuperColliderTrack, { |out=0, freq=220, amp=0.15|\n"
+		"    var env = EnvGen.kr(Env.perc(0.01, 1.5), doneAction: 2);\n"
+		"    var sig = SinOsc.ar(freq * [1, 1.01], 0, amp) * env;\n"
+		"    Out.ar(out, sig);\n"
+		"}).add;\n"
+		"\n"
+		"Synth.tail(~ardourTrackGroup, \\ArdourSuperColliderTrack, [\n"
+		"    \\freq, 220,\n"
+		"    \\amp, 0.15\n"
+		"]);\n";
 }
 
 std::string

@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -71,4 +72,5 @@ private:
 	PBD::ScopedConnectionList      _connections;
 	bool _updating;
 	bool _dirty;
+	std::atomic<bool> _render_in_progress;
 };

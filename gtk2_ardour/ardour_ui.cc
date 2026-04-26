@@ -2914,6 +2914,11 @@ ARDOUR_UI::add_route_dialog_response (int r)
 		break;
 	case AddRouteDialog::SuperColliderTrack:
 	{
+		instrument = _session->supercollider_instrument ();
+		if (!instrument) {
+			warning << _("SuperColliderAU Audio Unit was not found while creating the track. The track will still be created, and Ardour will try to attach it when live playback starts.") << endmsg;
+		}
+
 		ChanCount one_midi_channel;
 		one_midi_channel.set (DataType::MIDI, 1);
 		std::list<std::shared_ptr<SuperColliderTrack> > tracks;

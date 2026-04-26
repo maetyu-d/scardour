@@ -56,6 +56,7 @@ private:
 	PBD::ScopedConnectionList _runtime_connections;
 	std::map<std::string, SuperColliderTrack const*> _active_tracks;
 	std::map<std::string, std::string> _active_regions;
+	std::map<std::string, samplepos_t> _active_region_ends;
 	std::string _last_error;
 	guint _transport_poll_source;
 	samplepos_t _last_transport_sample;

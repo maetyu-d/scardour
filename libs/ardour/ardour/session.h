@@ -825,6 +825,9 @@ public:
 		bool trigger_visibility = false
 		);
 
+	std::shared_ptr<PluginInfo> supercollider_instrument () const;
+	bool ensure_supercollider_instrument (std::shared_ptr<Route> const&, bool strict_io = true, std::string* error_out = 0);
+
 	SuperColliderSessionRuntime& supercollider_runtime ();
 	SuperColliderSessionRuntime const& supercollider_runtime () const;
 
