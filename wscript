@@ -833,7 +833,7 @@ def options(opt):
     opt.load('compiler_c')
     opt.load('compiler_cxx')
     autowaf.set_options(opt, debug_by_default=True)
-    opt.add_option('--program-name', type='string', action='store', default='Ardour', dest='program_name',
+    opt.add_option('--program-name', type='string', action='store', default='SCArdour', dest='program_name',
                     help='The user-visible name of the program being built')
     opt.add_option('--arch', type='string', action='store', dest='arch',
                     help='Architecture-specific compiler FLAGS')
@@ -991,7 +991,7 @@ def configure(conf):
         if itstool != "itstool" or version[0] < "2":
             conf.fatal("--freedesktop requires itstool > 2.0.0 to translate files.")
 
-    conf.env['PROGRAM_NAME'] = Options.options.program_name or 'Ardour'
+    conf.env['PROGRAM_NAME'] = Options.options.program_name or 'SCArdour'
 
     conf.env['VERSION'] = VERSION
     conf.env['MAJOR'] = MAJOR

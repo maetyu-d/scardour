@@ -45,6 +45,8 @@ private:
 	std::string bootstrap_code () const;
 	std::string track_play_region_code (SuperColliderTrack const&, Region const&) const;
 	std::string track_stop_code (SuperColliderTrack const&) const;
+	bool handle_runtime_line (std::string const&);
+	bool deliver_live_midi_event (std::string const&, int, int, int);
 	void poll_transport ();
 	void sync_transport_state ();
 	std::shared_ptr<Region> active_region (SuperColliderTrack const&, samplepos_t) const;
@@ -58,6 +60,7 @@ private:
 	std::map<std::string, std::string> _active_regions;
 	std::map<std::string, samplepos_t> _active_region_ends;
 	std::string _last_error;
+	std::string _runtime_output_buffer;
 	guint _transport_poll_source;
 	samplepos_t _last_transport_sample;
 	bool _last_transport_rolling;

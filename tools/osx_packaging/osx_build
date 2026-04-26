@@ -81,11 +81,11 @@ while [ $# -gt 0 ] ; do
 	--public)
 		WITH_HARRISON_LV2=1 ;
 		WITH_GMSYNTH=1
-		PRODUCT_PKG_DIR=Ardour;
-		APPNAME=Ardour ;
-		BUNDLENAME=Ardour${major_version} ;
-		lower_case_appname=ardour;
-		BUNDLE_ID_BASE=org.ardour
+		PRODUCT_PKG_DIR=SCArdour;
+		APPNAME=SCArdour ;
+		BUNDLENAME=SCArdour${major_version} ;
+		lower_case_appname=scardour;
+		BUNDLE_ID_BASE=org.scardour
 		shift ;;
 
 	#

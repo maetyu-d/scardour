@@ -52,6 +52,7 @@ using namespace ARDOUR;
 SuperColliderTrackEditor::SuperColliderTrackEditor (std::shared_ptr<Route> route)
 	: ArdourWindow ("")
 	, _synthdef_label (_("SynthDef"))
+	, _auto_synthdef_button (_("Auto-fill from source"))
 	, _auto_boot_button (_("Auto-start runtime"))
 	, _apply_button (_("Apply"))
 	, _restart_button (_("Restart"))
@@ -81,6 +82,7 @@ SuperColliderTrackEditor::SuperColliderTrackEditor (std::shared_ptr<Route> route
 
 	_controls_box.pack_start (_synthdef_label, false, false);
 	_controls_box.pack_start (_synthdef_entry, true, true);
+	_controls_box.pack_start (_auto_synthdef_button, false, false);
 	_controls_box.pack_start (_auto_boot_button, false, false);
 	_controls_box.pack_start (_apply_button, false, false);
 	_controls_box.pack_start (_restart_button, false, false);
@@ -96,8 +98,9 @@ SuperColliderTrackEditor::SuperColliderTrackEditor (std::shared_ptr<Route> route
 
 	_route->PropertyChanged.connect (_connections, invalidator (*this), std::bind (&SuperColliderTrackEditor::route_property_changed, this, _1), gui_context ());
 	_route->DropReferences.connect (_connections, invalidator (*this), std::bind (&SuperColliderTrackEditor::route_going_away, this), gui_context ());
-	_source_buffer->signal_changed ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::mark_dirty));
+	_source_buffer->signal_changed ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::source_or_autofill_changed));
 	_synthdef_entry.signal_changed ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::mark_dirty));
+	_auto_synthdef_button.signal_toggled ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::source_or_autofill_changed));
 	_auto_boot_button.signal_toggled ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::mark_dirty));
 	_apply_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::apply_changes));
 	_restart_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::restart_runtime));
@@ -191,8 +194,6 @@ SuperColliderTrackEditor::sync_editor ()
 	std::string status_text;
 	if (_dirty) {
 		status_text = _("Runtime status: unsaved changes");
-	} else if (sct->supercollider_generates_midi ()) {
-		status_text = _("Runtime status: MIDI render track");
 	} else if (sct->supercollider_runtime_running ()) {
 		status_text = _("Runtime status: running");
 	} else if (!sct->supercollider_runtime_last_error ().empty ()) {
@@ -205,6 +206,14 @@ SuperColliderTrackEditor::sync_editor ()
 
 	_updating = true;
 	_synthdef_entry.set_text (sct->supercollider_synthdef ());
+	_auto_synthdef_button.set_active (sct->supercollider_auto_synthdef ());
+	_auto_synthdef_button.set_sensitive (!sct->supercollider_generates_midi ());
+	if (sct->supercollider_generates_midi ()) {
+		_auto_synthdef_button.hide ();
+	} else {
+		_auto_synthdef_button.show ();
+	}
+	_synthdef_entry.set_sensitive (!sct->supercollider_auto_synthdef ());
 	_auto_boot_button.set_active (sct->supercollider_auto_boot ());
 	_auto_boot_button.set_sensitive (sct->supports_live_runtime ());
 	_source_buffer->set_text (sct->supercollider_source ());
@@ -233,6 +242,33 @@ SuperColliderTrackEditor::mark_dirty ()
 }
 
 void
+SuperColliderTrackEditor::source_or_autofill_changed ()
+{
+	if (_updating) {
+		return;
+	}
+
+	std::shared_ptr<SuperColliderTrack> sct = std::dynamic_pointer_cast<SuperColliderTrack> (_route);
+	if (!sct) {
+		return;
+	}
+
+	if (!sct->supercollider_generates_midi () && _auto_synthdef_button.get_active ()) {
+		_synthdef_entry.set_sensitive (false);
+		std::string const inferred = SuperColliderTrack::infer_supercollider_synthdef (_source_buffer->get_text ());
+		if (!inferred.empty () && _synthdef_entry.get_text () != inferred) {
+			_updating = true;
+			_synthdef_entry.set_text (inferred);
+			_updating = false;
+		}
+	} else {
+		_synthdef_entry.set_sensitive (true);
+	}
+
+	mark_dirty ();
+}
+
+void
 SuperColliderTrackEditor::apply_changes ()
 {
 	std::shared_ptr<SuperColliderTrack> sct = std::dynamic_pointer_cast<SuperColliderTrack> (_route);
@@ -240,9 +276,12 @@ SuperColliderTrackEditor::apply_changes ()
 		return;
 	}
 
-	sct->set_supercollider_synthdef (_synthdef_entry.get_text ());
+	sct->set_supercollider_auto_synthdef (_auto_synthdef_button.get_active ());
 	sct->set_supercollider_auto_boot (_auto_boot_button.get_active ());
 	sct->set_supercollider_source (_source_buffer->get_text ());
+	if (!sct->supercollider_auto_synthdef ()) {
+		sct->set_supercollider_synthdef (_synthdef_entry.get_text ());
+	}
 
 	_dirty = false;
 	sync_editor ();
@@ -596,16 +635,26 @@ SuperColliderTrackEditor::render_to_timeline ()
 				<< "s.options.numInputBusChannels = 2;\n"
 				<< "s.waitForBoot({\n"
 				<< "    s.record(path: outputPath, numChannels: 2);\n"
-				<< "    ~ardourTracks = IdentityDictionary.new;\n"
-				<< "    ~ardourTrackId = " << sc_string_literal (track_id) << ";\n"
-				<< "    ~ardourTrackName = " << sc_string_literal (track_name) << ";\n"
-				<< "    ~ardourSynthDef = " << sc_string_literal (synthdef) << ";\n"
-				<< "    ~ardourRegionId = " << sc_string_literal (i->clip_id) << ";\n"
-				<< "    ~ardourRegionName = " << sc_string_literal (i->clip_name) << ";\n"
-				<< "    ~ardourRegionStart = 0;\n"
-				<< "    ~ardourRegionEnd = " << i->length_samples << ";\n"
-				<< "    ~ardourRegionDuration = duration;\n"
-				<< "    ~ardourTrackGroup = Group.tail(s);\n";
+				<< "    ~scardourTracks = IdentityDictionary.new;\n"
+				<< "    ~ardourTracks = ~scardourTracks;\n"
+				<< "    ~scardourTrackId = " << sc_string_literal (track_id) << ";\n"
+				<< "    ~scardourTrackName = " << sc_string_literal (track_name) << ";\n"
+				<< "    ~scardourSynthDef = " << sc_string_literal (synthdef) << ";\n"
+				<< "    ~scardourRegionId = " << sc_string_literal (i->clip_id) << ";\n"
+				<< "    ~scardourRegionName = " << sc_string_literal (i->clip_name) << ";\n"
+				<< "    ~scardourRegionStart = 0;\n"
+				<< "    ~scardourRegionEnd = " << i->length_samples << ";\n"
+				<< "    ~scardourRegionDuration = duration;\n"
+				<< "    ~ardourTrackId = ~scardourTrackId;\n"
+				<< "    ~ardourTrackName = ~scardourTrackName;\n"
+				<< "    ~ardourSynthDef = ~scardourSynthDef;\n"
+				<< "    ~ardourRegionId = ~scardourRegionId;\n"
+				<< "    ~ardourRegionName = ~scardourRegionName;\n"
+				<< "    ~ardourRegionStart = ~scardourRegionStart;\n"
+				<< "    ~ardourRegionEnd = ~scardourRegionEnd;\n"
+				<< "    ~ardourRegionDuration = ~scardourRegionDuration;\n"
+				<< "    ~scardourTrackGroup = Group.tail(s);\n"
+				<< "    ~ardourTrackGroup = ~scardourTrackGroup;\n";
 
 			if (source_is_language_script) {
 				if (split_synthdef) {
@@ -618,16 +667,17 @@ SuperColliderTrackEditor::render_to_timeline ()
 				}
 			} else {
 				script
-					<< "    ~ardourRenderPlayer = {\n"
+					<< "    ~scardourRenderPlayer = {\n"
 					<< source << "\n"
-					<< "    }.play(target: ~ardourTrackGroup);\n";
+					<< "    }.play(target: ~scardourTrackGroup);\n"
+					<< "    ~ardourRenderPlayer = ~scardourRenderPlayer;\n";
 			}
 
 			script
 				<< "    SystemClock.sched(duration.max(0.05), {\n"
-				<< "        if (~ardourTrackGroup.notNil) {\n"
-				<< "            ~ardourTrackGroup.freeAll;\n"
-				<< "            ~ardourTrackGroup.free;\n"
+				<< "        if (~scardourTrackGroup.notNil) {\n"
+				<< "            ~scardourTrackGroup.freeAll;\n"
+				<< "            ~scardourTrackGroup.free;\n"
 				<< "        };\n"
 				<< "        s.stopRecording;\n"
 				<< "        s.freeAll;\n"
@@ -903,14 +953,22 @@ SuperColliderTrackEditor::render_to_midi_track ()
 				<< "    if (value.isNil) { value = fallback; };\n"
 				<< "    value;\n"
 				<< "};\n"
-				<< "~ardourTrackId = " << sc_string_literal (track_id) << ";\n"
-				<< "~ardourTrackName = " << sc_string_literal (track_name) << ";\n"
-				<< "~ardourSynthDef = " << sc_string_literal (pattern_name) << ";\n"
-				<< "~ardourRegionId = " << sc_string_literal (i->clip_id) << ";\n"
-				<< "~ardourRegionName = " << sc_string_literal (i->clip_name) << ";\n"
-				<< "~ardourMidiNotes = List.new;\n"
+				<< "~scardourTrackId = " << sc_string_literal (track_id) << ";\n"
+				<< "~scardourTrackName = " << sc_string_literal (track_name) << ";\n"
+				<< "~scardourSynthDef = " << sc_string_literal (pattern_name) << ";\n"
+				<< "~scardourRegionId = " << sc_string_literal (i->clip_id) << ";\n"
+				<< "~scardourRegionName = " << sc_string_literal (i->clip_name) << ";\n"
+				<< "~ardourTrackId = ~scardourTrackId;\n"
+				<< "~ardourTrackName = ~scardourTrackName;\n"
+				<< "~ardourSynthDef = ~scardourSynthDef;\n"
+				<< "~ardourRegionId = ~scardourRegionId;\n"
+				<< "~ardourRegionName = ~scardourRegionName;\n"
+				<< "~scardourMidiNotes = List.new;\n"
+				<< "~ardourMidiNotes = ~scardourMidiNotes;\n"
 				<< source << "\n"
-				<< "notes = ~ardourMidiNotes ? Array.new;\n"
+				<< "~ardourMidiNotes = ~ardourMidiNotes ? ~scardourMidiNotes;\n"
+				<< "~scardourMidiNotes = ~scardourMidiNotes ? ~ardourMidiNotes;\n"
+				<< "notes = ~scardourMidiNotes ? Array.new;\n"
 				<< "File.use(outputPath, \"w\", { |file|\n"
 				<< "    notes.do({ |event|\n"
 				<< "        var start = eventValue.(event, \\start, \"start\", eventValue.(event, \\time, \"time\", 0)).asFloat;\n"

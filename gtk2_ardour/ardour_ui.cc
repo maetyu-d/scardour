@@ -2862,6 +2862,7 @@ ARDOUR_UI::add_route_dialog_response (int r)
 	AutoConnectOption oac = Config->get_output_auto_connect();
 	bool strict_io = add_route_dialog->use_strict_io ();
 	bool trigger_visibility = add_route_dialog->show_on_cue_page ();
+	bool create_sc_midi_companion = add_route_dialog->create_sc_midi_companion_track ();
 
 	AddRouteDialog::TypeWanted type = add_route_dialog->type_wanted ();
 
@@ -2945,6 +2946,29 @@ ARDOUR_UI::add_route_dialog_response (int r)
 		if (tracks.size() != count) {
 			error << string_compose(P_("could not create %1 new SuperCollider MIDI track", "could not create %1 new SuperCollider MIDI tracks", count), count) << endmsg;
 		} else if (!tracks.empty ()) {
+			if (create_sc_midi_companion) {
+				for (const auto& sc_track : tracks) {
+					std::list<std::shared_ptr<MidiTrack> > companions = _session->new_midi_track (
+						one_midi_channel, one_midi_channel, strict_io, instrument, 0,
+						std::shared_ptr<RouteGroup> (), 1,
+						string_compose (_("%1 Synth"), sc_track->name ()),
+						PresentationInfo::max_order, ARDOUR::Normal, true, false);
+
+					if (companions.empty ()) {
+						warning << string_compose (_("Could not create a companion synth track for '%1'"), sc_track->name ()) << endmsg;
+						continue;
+					}
+
+					std::shared_ptr<MidiTrack> companion = companions.front ();
+					std::shared_ptr<Port> source_port = sc_track->output () ? sc_track->output ()->nth (0) : std::shared_ptr<Port> ();
+					std::shared_ptr<Port> dest_port = companion->input () ? companion->input ()->nth (0) : std::shared_ptr<Port> ();
+
+					if (!source_port || !dest_port || companion->input ()->connect (dest_port, source_port->name ())) {
+						warning << string_compose (_("Could not auto-connect SuperCollider MIDI track '%1' to companion track '%2'"), sc_track->name (), companion->name ()) << endmsg;
+					}
+				}
+			}
+
 			SuperColliderTrackEditor* editor = tracks.front ()->supercollider_editor ();
 			if (!editor) {
 				editor = new SuperColliderTrackEditor (tracks.front ());

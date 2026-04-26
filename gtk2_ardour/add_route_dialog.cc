@@ -82,6 +82,7 @@ AddRouteDialog::AddRouteDialog ()
 	, instrument_label (_("Instrument:"))
 	, instrument_combo (InstrumentSelector::ForTrackSelector)
 	, show_on_cue_chkbox (_("Show on Cue Page"))
+	, sc_midi_companion_chkbox (_("Create companion synth track and connect it"))
 	, last_route_count (1)
 	, route_count_set_by_template (false)
 	, name_edited_by_user (false)
@@ -140,12 +141,13 @@ AddRouteDialog::AddRouteDialog ()
 
 		builtin_types.emplace_back(_("SuperCollider MIDI Tracks"), std::string () +
 		     _("Use these settings to create one or more SuperCollider MIDI generator tracks.") + "\n\n" +
-		     _("These tracks use SuperCollider code to render note data into a companion MIDI track.") + "\n\n" +
+		     _("These tracks use SuperCollider code to generate live MIDI and/or render note data into ordinary MIDI tracks.") + "\n\n" +
 		     _("You may select:") + "\n" +
 		     "* " + _("The number of tracks to add") + "\n" +
 		     "* " + _("A name for the track(s)") + "\n" +
+		     "* " + _("Whether Ardour should auto-create a companion synth track and connect it") + "\n" +
 		     "* " + _("A group which the track(s) will be assigned to") + "\n" +
-		     "\n" + _("Live audio playback is not used for this track type; use the editor to render MIDI.")
+		     "\n" + _("Use the editor for live MIDI playback or to render the generated notes into a companion MIDI track.")
 		     );
 
 		builtin_types.emplace_back(_("Audio Busses"), std::string () +
@@ -202,6 +204,8 @@ AddRouteDialog::AddRouteDialog ()
 	strict_io_combo.set_active (Config->get_strict_io () ? 1 : 0);
 
 	show_on_cue_chkbox.set_active (UIConfiguration::instance().get_show_on_cue_page ());
+	sc_midi_companion_chkbox.set_active (true);
+	sc_midi_companion_chkbox.set_no_show_all (true);
 
 	/* top-level VBox */
 	VBox* vbox = manage (new VBox);
@@ -343,6 +347,7 @@ AddRouteDialog::AddRouteDialog ()
 	outer_box->pack_start (insert_label, false, false);
 	outer_box->pack_start (insert_at_combo, false, false);
 	outer_box->pack_start (show_on_cue_chkbox, false, false);
+	outer_box->pack_start (sc_midi_companion_chkbox, false, false);
 
 	/* quick-add button (add item but don't close dialog) */
 	Gtk::Button* addnoclose_button = manage (new Gtk::Button(_("Add selected items (and leave dialog open)")));
@@ -361,6 +366,7 @@ AddRouteDialog::AddRouteDialog ()
 	route_group_combo.set_row_separator_func (sigc::mem_fun (*this, &AddRouteDialog::route_separator));
 	route_group_combo.signal_changed ().connect (sigc::mem_fun (*this, &AddRouteDialog::group_changed));
 	instrument_combo.signal_changed ().connect (sigc::mem_fun (*this, &AddRouteDialog::instrument_changed));
+	sc_midi_companion_chkbox.signal_toggled ().connect (sigc::mem_fun (*this, &AddRouteDialog::sc_midi_companion_changed));
 
 	routes_spinner.signal_activate ().connect (sigc::bind (sigc::mem_fun (*this, &Gtk::Dialog::response), AddAndClose));
 	name_template_entry.signal_activate ().connect (sigc::bind (sigc::mem_fun (*this, &Gtk::Dialog::response), AddAndClose));
@@ -541,12 +547,27 @@ AddRouteDialog::trk_template_row_selected ()
 void
 AddRouteDialog::instrument_changed ()
 {
+	if (type_wanted () != MidiTrack && type_wanted () != MidiBus) {
+		return;
+	}
+
 	if (name_edited_by_user) {
 		return;
 	}
 	std::string n = instrument_combo.selected_instrument_name ();
 	name_template_entry.set_text (n.empty () ? _("MIDI") : n);
 	reset_name_edited ();
+}
+
+void
+AddRouteDialog::sc_midi_companion_changed ()
+{
+	if (type_wanted () != SuperColliderMidiTrack) {
+		return;
+	}
+
+	instrument_label.set_sensitive (sc_midi_companion_chkbox.get_active ());
+	instrument_combo.set_sensitive (sc_midi_companion_chkbox.get_active ());
 }
 
 void
@@ -692,6 +713,8 @@ AddRouteDialog::track_type_chosen ()
 {
 	switch (type_wanted()) {
 	case AudioTrack:
+		instrument_label.set_text (_("Instrument:"));
+		sc_midi_companion_chkbox.hide ();
 
 		configuration_label.set_sensitive (true);
 		channel_combo.set_sensitive (true);
@@ -715,6 +738,8 @@ AddRouteDialog::track_type_chosen ()
 
 		break;
 	case MidiTrack:
+		instrument_label.set_text (_("Instrument:"));
+		sc_midi_companion_chkbox.hide ();
 
 		configuration_label.set_sensitive (false);
 		channel_combo.set_sensitive (false);
@@ -738,7 +763,8 @@ AddRouteDialog::track_type_chosen ()
 
 		break;
 	case SuperColliderTrack:
-	case SuperColliderMidiTrack:
+		instrument_label.set_text (_("Instrument:"));
+		sc_midi_companion_chkbox.hide ();
 
 		configuration_label.set_sensitive (false);
 		channel_combo.set_sensitive (false);
@@ -761,7 +787,34 @@ AddRouteDialog::track_type_chosen ()
 		insert_at_combo.set_sensitive (true);
 
 		break;
+	case SuperColliderMidiTrack:
+		instrument_label.set_text (_("Companion Synth:"));
+		sc_midi_companion_chkbox.show ();
+
+		configuration_label.set_sensitive (false);
+		channel_combo.set_sensitive (false);
+
+		mode_label.set_sensitive (false);
+		mode_combo.set_sensitive (false);
+
+		instrument_label.set_sensitive (sc_midi_companion_chkbox.get_active ());
+		instrument_combo.set_sensitive (sc_midi_companion_chkbox.get_active ());
+
+		group_label.set_sensitive (true);
+		route_group_combo.set_sensitive (true);
+
+		strict_io_label.set_sensitive (true);
+		strict_io_combo.set_sensitive (true);
+
+		show_on_cue_chkbox.set_sensitive (true);
+
+		insert_label.set_sensitive (true);
+		insert_at_combo.set_sensitive (true);
+
+		break;
 	case AudioBus:
+		instrument_label.set_text (_("Instrument:"));
+		sc_midi_companion_chkbox.hide ();
 
 		configuration_label.set_sensitive (true);
 		channel_combo.set_sensitive (true);
@@ -785,6 +838,8 @@ AddRouteDialog::track_type_chosen ()
 
 		break;
 	case VCAMaster:
+		instrument_label.set_text (_("Instrument:"));
+		sc_midi_companion_chkbox.hide ();
 
 		configuration_label.set_sensitive (false);
 		channel_combo.set_sensitive (false);
@@ -808,6 +863,8 @@ AddRouteDialog::track_type_chosen ()
 
 		break;
 	case MidiBus:
+		instrument_label.set_text (_("Instrument:"));
+		sc_midi_companion_chkbox.hide ();
 
 		configuration_label.set_sensitive (false);
 		channel_combo.set_sensitive (false);
@@ -831,6 +888,8 @@ AddRouteDialog::track_type_chosen ()
 
 		break;
 	case FoldbackBus:
+		instrument_label.set_text (_("Instrument:"));
+		sc_midi_companion_chkbox.hide ();
 
 		configuration_label.set_sensitive (true);
 		channel_combo.set_sensitive (true);
@@ -1129,6 +1188,12 @@ AddRouteDialog::route_group ()
 	}
 
 	return _session->route_group_by_name (route_group_combo.get_active_text());
+}
+
+bool
+AddRouteDialog::create_sc_midi_companion_track () const
+{
+	return const_cast<AddRouteDialog*> (this)->type_wanted () == SuperColliderMidiTrack && sc_midi_companion_chkbox.get_active ();
 }
 
 bool

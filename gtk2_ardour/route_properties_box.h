@@ -71,6 +71,7 @@ private:
 	void surround_master_added_or_removed ();
 	void sync_supercollider_editor ();
 	void mark_supercollider_editor_dirty ();
+	void supercollider_source_or_autofill_changed ();
 	void apply_supercollider_changes ();
 	void restart_supercollider_runtime ();
 
@@ -90,6 +91,7 @@ private:
 	Gtk::Label                _supercollider_status;
 	Gtk::Label                _supercollider_synthdef_label;
 	Gtk::Entry                _supercollider_synthdef_entry;
+	Gtk::CheckButton          _supercollider_auto_synthdef_button;
 	Gtk::CheckButton          _supercollider_auto_boot_button;
 	Gtk::Button               _supercollider_apply_button;
 	Gtk::Button               _supercollider_restart_button;

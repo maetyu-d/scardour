@@ -30,12 +30,15 @@ public:
 	void set_supercollider_synthdef (std::string const&);
 	std::string const& supercollider_synthdef () const { return _supercollider_synthdef; }
 
+	void set_supercollider_auto_synthdef (bool yn);
+	bool supercollider_auto_synthdef () const { return _supercollider_auto_synthdef; }
+
 	void set_supercollider_auto_boot (bool yn);
 	bool supercollider_auto_boot () const { return _supercollider_auto_boot; }
 
 	OutputMode supercollider_output_mode () const { return _supercollider_output_mode; }
 	bool supercollider_generates_midi () const { return _supercollider_output_mode == MidiOutput; }
-	bool supports_live_runtime () const { return _supercollider_output_mode == AudioOutput; }
+	bool supports_live_runtime () const { return true; }
 
 	bool supercollider_runtime_available () const;
 	std::string supercollider_runtime_path () const;
@@ -46,6 +49,7 @@ public:
 	std::string const& supercollider_runtime_last_error () const { return _supercollider_runtime_last_error; }
 
 	static bool xml_node_is_supercollider (XMLNode const&);
+	static std::string infer_supercollider_synthdef (std::string const&);
 
 protected:
 	XMLNode& state (bool save_template) const;
@@ -55,6 +59,7 @@ private:
 	static std::string default_supercollider_synthdef (OutputMode);
 	static OutputMode parse_output_mode (std::string const&);
 	static std::string output_mode_to_string (OutputMode);
+	void update_inferred_synthdef ();
 
 	void maybe_start_runtime_after_load ();
 	void refresh_runtime ();
@@ -64,6 +69,7 @@ private:
 
 	std::string _supercollider_source;
 	std::string _supercollider_synthdef;
+	bool _supercollider_auto_synthdef;
 	bool _supercollider_auto_boot;
 	OutputMode _supercollider_output_mode;
 	std::string _supercollider_runtime_last_error;

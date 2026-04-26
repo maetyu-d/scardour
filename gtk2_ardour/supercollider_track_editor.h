@@ -51,6 +51,7 @@ private:
 	void update_title ();
 	void sync_editor ();
 	void mark_dirty ();
+	void source_or_autofill_changed ();
 	void apply_changes ();
 	void restart_runtime ();
 	void render_to_timeline ();
@@ -61,6 +62,7 @@ private:
 	Gtk::HBox _controls_box;
 	Gtk::Label _synthdef_label;
 	Gtk::Entry _synthdef_entry;
+	Gtk::CheckButton _auto_synthdef_button;
 	Gtk::CheckButton _auto_boot_button;
 	Gtk::Button _apply_button;
 	Gtk::Button _restart_button;

@@ -1,5 +1,6 @@
 #include "ardour/supercollider_session.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -7,6 +8,8 @@
 #include <sstream>
 
 #include <glib.h>
+
+#include "evoral/Event.h"
 
 #include "ardour/filesystem_paths.h"
 #include "ardour/playlist.h"
@@ -19,6 +22,8 @@
 
 #include "pbd/compose.h"
 #include "pbd/error.h"
+
+#include "temporal/tempo.h"
 
 #include "pbd/i18n.h"
 
@@ -163,6 +168,7 @@ SuperColliderSessionRuntime::stop ()
 	_active_tracks.clear ();
 	_active_regions.clear ();
 	_active_region_ends.clear ();
+	_runtime_output_buffer.clear ();
 	_runtime_connections.drop_connections ();
 	_last_transport_sample = std::numeric_limits<samplepos_t>::max ();
 	_last_transport_rolling = false;
@@ -171,6 +177,48 @@ SuperColliderSessionRuntime::stop ()
 		_runtime->terminate ();
 		_runtime.reset ();
 	}
+}
+
+bool
+SuperColliderSessionRuntime::handle_runtime_line (std::string const& line)
+{
+	static std::string const prefix = "[SCArdourMIDILive]\t";
+
+	if (line.compare (0, prefix.size (), prefix) != 0) {
+		return false;
+	}
+
+	std::string const payload = line.substr (prefix.size ());
+	std::istringstream parser (payload);
+	std::string track_id;
+	std::string status_str;
+	std::string data1_str;
+	std::string data2_str;
+
+	if (!std::getline (parser, track_id, '\t') ||
+	    !std::getline (parser, status_str, '\t') ||
+	    !std::getline (parser, data1_str, '\t') ||
+	    !std::getline (parser, data2_str, '\t')) {
+		return true;
+	}
+
+	return deliver_live_midi_event (track_id, atoi (status_str.c_str ()), atoi (data1_str.c_str ()), atoi (data2_str.c_str ()));
+}
+
+bool
+SuperColliderSessionRuntime::deliver_live_midi_event (std::string const& track_id, int status, int data1, int data2)
+{
+	std::map<std::string, SuperColliderTrack const*>::const_iterator const it = _active_tracks.find (track_id);
+	if (it == _active_tracks.end () || !it->second) {
+		return false;
+	}
+
+	uint8_t event[3];
+	event[0] = static_cast<uint8_t> (std::max (0, std::min (255, status)));
+	event[1] = static_cast<uint8_t> (std::max (0, std::min (127, data1)));
+	event[2] = static_cast<uint8_t> (std::max (0, std::min (127, data2)));
+
+	return const_cast<SuperColliderTrack*> (it->second)->write_immediate_event (Evoral::MIDI_EVENT, 3, event);
 }
 
 void
@@ -354,12 +402,14 @@ SuperColliderSessionRuntime::bootstrap_code () const
 
 	return string_compose (
 		"(\n"
-		"~ardourTracks = ~ardourTracks ? IdentityDictionary.new;\n"
+		"~scardourTracks = ~scardourTracks ? IdentityDictionary.new;\n"
+		"~ardourTracks = ~ardourTracks ? ~scardourTracks;\n"
+		"~scardourTracks = ~ardourTracks;\n"
 		"Server.default = Server.default ? Server.local;\n"
 		"s = Server.default;\n"
 		"%1"
 		"s.waitForBoot({\n"
-		"    \"[Ardour] SuperCollider session ready\".postln;\n"
+		"    \"[SCArdour] SuperCollider session ready\".postln;\n"
 		"});\n"
 		"s.boot;\n"
 		")\n",
@@ -371,6 +421,129 @@ std::string
 SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& track, Region const& region) const
 {
 	std::string const source = track.supercollider_source ();
+
+	if (track.supercollider_generates_midi ()) {
+		Temporal::TempoMap::SharedPtr tmap (Temporal::TempoMap::use ());
+		double const bpm = tmap ? tmap->tempo_at (region.position_sample ()).quarter_notes_per_minute () : 120.0;
+
+		return string_compose (
+			"(\n"
+			"var trackId = %1;\n"
+			"var trackName = %2;\n"
+			"var synthdefName = %3;\n"
+			"var regionId = %4;\n"
+			"var regionName = %5;\n"
+			"var regionStart = %6;\n"
+			"var regionEnd = %7;\n"
+			"var regionTempo = %8;\n"
+			"~scardourTracks = ~scardourTracks ? IdentityDictionary.new;\n"
+			"~ardourTracks = ~ardourTracks ? ~scardourTracks;\n"
+			"~scardourTracks = ~ardourTracks;\n"
+			"s = Server.default ? Server.local;\n"
+			"s.waitForBoot({\n"
+			"    var state = ~scardourTracks[trackId];\n"
+			"    var sendMidi;\n"
+			"    var noteOn;\n"
+			"    var noteOff;\n"
+			"    var flushNotes;\n"
+			"    if (state.notNil) {\n"
+			"        if (state[\\routine].notNil) { state[\\routine].stop; };\n"
+			"        if (state[\\clock].notNil) { state[\\clock].clear; state[\\clock].stop; };\n"
+			"        if (state[\\flushNotes].notNil) { state[\\flushNotes].value; };\n"
+			"    };\n"
+			"    sendMidi = { |status, data1, data2|\n"
+			"        (\"[SCArdourMIDILive]\\t\" ++ trackId ++ \"\\t\" ++ status.asInteger.asString ++ \"\\t\" ++ data1.asInteger.asString ++ \"\\t\" ++ data2.asInteger.asString).postln;\n"
+			"    };\n"
+			"    noteOn = { |note, velocity = 100, channel = 0|\n"
+			"        var ch = channel.asInteger.clip(0, 15);\n"
+			"        var nn = note.asInteger.clip(0, 127);\n"
+			"        var vv = velocity.asInteger.clip(1, 127);\n"
+			"        state[\\activeNotes][ch.asString ++ \":\" ++ nn.asString] = [ch, nn];\n"
+			"        sendMidi.value(0x90 + ch, nn, vv);\n"
+			"    };\n"
+			"    noteOff = { |note, channel = 0|\n"
+			"        var ch = channel.asInteger.clip(0, 15);\n"
+			"        var nn = note.asInteger.clip(0, 127);\n"
+			"        state[\\activeNotes].removeAt(ch.asString ++ \":\" ++ nn.asString);\n"
+			"        sendMidi.value(0x80 + ch, nn, 0);\n"
+			"    };\n"
+			"    flushNotes = {\n"
+			"        if (state[\\activeNotes].notNil) {\n"
+			"            state[\\activeNotes].keysValuesDo({ |key, pair| noteOff.value(pair[1], pair[0]); });\n"
+			"            state[\\activeNotes].clear;\n"
+			"        };\n"
+			"    };\n"
+			"    ~scardourTrackId = trackId;\n"
+			"    ~scardourTrackName = trackName;\n"
+			"    ~scardourSynthDef = synthdefName;\n"
+			"    ~scardourRegionId = regionId;\n"
+			"    ~scardourRegionName = regionName;\n"
+			"    ~scardourRegionStart = regionStart;\n"
+			"    ~scardourRegionEnd = regionEnd;\n"
+			"    ~ardourTrackId = ~scardourTrackId;\n"
+			"    ~ardourTrackName = ~scardourTrackName;\n"
+			"    ~ardourSynthDef = ~scardourSynthDef;\n"
+			"    ~ardourRegionId = ~scardourRegionId;\n"
+			"    ~ardourRegionName = ~scardourRegionName;\n"
+			"    ~ardourRegionStart = ~scardourRegionStart;\n"
+			"    ~ardourRegionEnd = ~scardourRegionEnd;\n"
+			"    ~scardourMidiNotes = nil;\n"
+			"    ~ardourMidiNotes = ~scardourMidiNotes;\n"
+			"    ~scardourMidiSend = sendMidi;\n"
+			"    ~scardourNoteOn = noteOn;\n"
+			"    ~scardourNoteOff = noteOff;\n"
+			"    ~ardourMidiSend = ~scardourMidiSend;\n"
+			"    ~ardourNoteOn = ~scardourNoteOn;\n"
+			"    ~ardourNoteOff = ~scardourNoteOff;\n"
+			"    state = (name: trackName, synthdef: synthdefName, player: nil, routine: nil, clock: nil, activeNotes: IdentityDictionary.new, flushNotes: flushNotes, region: regionName, regionId: regionId, regionStart: regionStart, regionEnd: regionEnd);\n"
+			"    ~scardourTracks[trackId] = state;\n"
+			"%9"
+			"    ~ardourMidiNotes = ~ardourMidiNotes ? ~scardourMidiNotes;\n"
+			"    ~scardourMidiNotes = ~scardourMidiNotes ? ~ardourMidiNotes;\n"
+			"    if (~scardourMidiNotes.notNil) {\n"
+			"        var events = List.new;\n"
+			"        ~scardourMidiNotes.do({ |noteEvent|\n"
+			"            var start = ((noteEvent[\\start] ? noteEvent[\\time]) ? 0.0).asFloat.max(0.0);\n"
+			"            var length = ((noteEvent[\\length] ? noteEvent[\\dur]) ? 0.25).asFloat.max(0.0);\n"
+			"            var note = ((noteEvent[\\note] ? noteEvent[\\pitch]) ? 60).asInteger.clip(0, 127);\n"
+			"            var velocity = ((noteEvent[\\velocity] ? noteEvent[\\vel]) ? 100).asInteger.clip(1, 127);\n"
+			"            var channel = (noteEvent[\\channel] ? 0).asInteger.clip(0, 15);\n"
+			"            events.add((time: start, kind: \\on, note: note, velocity: velocity, channel: channel));\n"
+			"            events.add((time: start + length, kind: \\off, note: note, velocity: 0, channel: channel));\n"
+			"        });\n"
+			"        events = events.sortBy(\\time);\n"
+			"        state[\\clock] = TempoClock(regionTempo / 60.0);\n"
+			"        state[\\routine] = Routine({\n"
+			"            var lastTime = 0.0;\n"
+			"            events.do({ |event|\n"
+			"                var waitTime = (event[\\time].asFloat - lastTime).max(0.0);\n"
+			"                waitTime.wait;\n"
+			"                if (event[\\kind] == \\on) {\n"
+			"                    noteOn.value(event[\\note], event[\\velocity], event[\\channel]);\n"
+			"                } {\n"
+			"                    noteOff.value(event[\\note], event[\\channel]);\n"
+			"                };\n"
+			"                lastTime = event[\\time].asFloat;\n"
+			"            });\n"
+			"        });\n"
+			"        state[\\routine].play(state[\\clock]);\n"
+			"        state[\\player] = state[\\routine];\n"
+			"    };\n"
+			"    ~scardourTracks[trackId] = state;\n"
+			"});\n"
+			")\n",
+			string_literal (track_key (track)),
+			string_literal (track.name ()),
+			string_literal (track.supercollider_synthdef ()),
+			string_literal (region.id ().to_s ()),
+			string_literal (region.name ()),
+			std::to_string (region.position_sample ()),
+			std::to_string (region.position_sample () + region.length_samples ()),
+			std::to_string (bpm),
+			source + "\n"
+		);
+	}
+
 	std::string player_code;
 
 	if (!source_looks_like_language_script (source)) {
@@ -400,10 +573,12 @@ SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& t
 		"var regionName = %5;\n"
 		"var regionStart = %6;\n"
 		"var regionEnd = %7;\n"
-		"~ardourTracks = ~ardourTracks ? IdentityDictionary.new;\n"
+		"~scardourTracks = ~scardourTracks ? IdentityDictionary.new;\n"
+		"~ardourTracks = ~ardourTracks ? ~scardourTracks;\n"
+		"~scardourTracks = ~ardourTracks;\n"
 		"s = Server.default ? Server.local;\n"
 		"s.waitForBoot({\n"
-		"    var state = ~ardourTracks[trackId];\n"
+		"    var state = ~scardourTracks[trackId];\n"
 		"    var trackGroup;\n"
 		"    if (state.notNil) {\n"
 		"        if (state[\\group].notNil) {\n"
@@ -412,17 +587,25 @@ SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& t
 		"        };\n"
 		"    };\n"
 		"    trackGroup = Group.tail(s);\n"
-		"    ~ardourTrackId = trackId;\n"
-		"    ~ardourTrackName = trackName;\n"
-		"    ~ardourSynthDef = synthdefName;\n"
-		"    ~ardourRegionId = regionId;\n"
-		"    ~ardourRegionName = regionName;\n"
-		"    ~ardourRegionStart = regionStart;\n"
-		"    ~ardourRegionEnd = regionEnd;\n"
-		"    ~ardourTrackGroup = trackGroup;\n"
+		"    ~scardourTrackId = trackId;\n"
+		"    ~scardourTrackName = trackName;\n"
+		"    ~scardourSynthDef = synthdefName;\n"
+		"    ~scardourRegionId = regionId;\n"
+		"    ~scardourRegionName = regionName;\n"
+		"    ~scardourRegionStart = regionStart;\n"
+		"    ~scardourRegionEnd = regionEnd;\n"
+		"    ~ardourTrackId = ~scardourTrackId;\n"
+		"    ~ardourTrackName = ~scardourTrackName;\n"
+		"    ~ardourSynthDef = ~scardourSynthDef;\n"
+		"    ~ardourRegionId = ~scardourRegionId;\n"
+		"    ~ardourRegionName = ~scardourRegionName;\n"
+		"    ~ardourRegionStart = ~scardourRegionStart;\n"
+		"    ~ardourRegionEnd = ~scardourRegionEnd;\n"
+		"    ~scardourTrackGroup = trackGroup;\n"
+		"    ~ardourTrackGroup = ~scardourTrackGroup;\n"
 		"    ~tone = nil;\n"
 		"    state = (name: trackName, synthdef: synthdefName, group: trackGroup, player: nil, region: regionName, regionId: regionId, regionStart: regionStart, regionEnd: regionEnd);\n"
-		"    ~ardourTracks[trackId] = state;\n"
+		"    ~scardourTracks[trackId] = state;\n"
 		"%8"
 		"    if (~tone.notNil) {\n"
 		"        state[\\player] = ~tone;\n"
@@ -430,7 +613,7 @@ SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& t
 		"        state[\\player] = trackGroup;\n"
 		"    };\n"
 		"    state[\\group] = trackGroup;\n"
-		"    ~ardourTracks[trackId] = state;\n"
+		"    ~scardourTracks[trackId] = state;\n"
 		"});\n"
 		")\n",
 		string_literal (track_key (track)),
@@ -453,10 +636,12 @@ SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& t
 		"var regionName = %5;\n"
 		"var regionStart = %6;\n"
 		"var regionEnd = %7;\n"
-		"~ardourTracks = ~ardourTracks ? IdentityDictionary.new;\n"
+		"~scardourTracks = ~scardourTracks ? IdentityDictionary.new;\n"
+		"~ardourTracks = ~ardourTracks ? ~scardourTracks;\n"
+		"~scardourTracks = ~ardourTracks;\n"
 		"s = Server.default ? Server.local;\n"
 		"s.waitForBoot({\n"
-		"    var state = ~ardourTracks[trackId];\n"
+		"    var state = ~scardourTracks[trackId];\n"
 		"    var trackGroup;\n"
 		"    if (state.notNil) {\n"
 		"        if (state[\\group].notNil) {\n"
@@ -465,20 +650,28 @@ SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& t
 		"        };\n"
 		"    };\n"
 		"    trackGroup = Group.tail(s);\n"
-		"    ~ardourTrackId = trackId;\n"
-		"    ~ardourTrackName = trackName;\n"
-		"    ~ardourSynthDef = synthdefName;\n"
-		"    ~ardourRegionId = regionId;\n"
-		"    ~ardourRegionName = regionName;\n"
-		"    ~ardourRegionStart = regionStart;\n"
-		"    ~ardourRegionEnd = regionEnd;\n"
-		"    ~ardourTrackGroup = trackGroup;\n"
+		"    ~scardourTrackId = trackId;\n"
+		"    ~scardourTrackName = trackName;\n"
+		"    ~scardourSynthDef = synthdefName;\n"
+		"    ~scardourRegionId = regionId;\n"
+		"    ~scardourRegionName = regionName;\n"
+		"    ~scardourRegionStart = regionStart;\n"
+		"    ~scardourRegionEnd = regionEnd;\n"
+		"    ~ardourTrackId = ~scardourTrackId;\n"
+		"    ~ardourTrackName = ~scardourTrackName;\n"
+		"    ~ardourSynthDef = ~scardourSynthDef;\n"
+		"    ~ardourRegionId = ~scardourRegionId;\n"
+		"    ~ardourRegionName = ~scardourRegionName;\n"
+		"    ~ardourRegionStart = ~scardourRegionStart;\n"
+		"    ~ardourRegionEnd = ~scardourRegionEnd;\n"
+		"    ~scardourTrackGroup = trackGroup;\n"
+		"    ~ardourTrackGroup = ~scardourTrackGroup;\n"
 		"    ~tone = nil;\n"
 		"    state = (name: trackName, synthdef: synthdefName, group: trackGroup, player: nil, region: regionName, regionId: regionId, regionStart: regionStart, regionEnd: regionEnd);\n"
-		"    ~ardourTracks[trackId] = state;\n"
+		"    ~scardourTracks[trackId] = state;\n"
 		"%8"
 		"    state[\\group] = trackGroup;\n"
-		"    ~ardourTracks[trackId] = state;\n"
+		"    ~scardourTracks[trackId] = state;\n"
 		"});\n"
 		")\n",
 		string_literal (track_key (track)),
@@ -495,10 +688,30 @@ SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& t
 std::string
 SuperColliderSessionRuntime::track_stop_code (SuperColliderTrack const& track) const
 {
+	if (track.supercollider_generates_midi ()) {
+		return string_compose (
+			"(\n"
+			"var trackId = %1;\n"
+			"var state = ~scardourTracks[trackId];\n"
+			"if (state.notNil) {\n"
+			"    if (state[\\routine].notNil) { state[\\routine].stop; state[\\routine] = nil; };\n"
+			"    if (state[\\clock].notNil) { state[\\clock].clear; state[\\clock].stop; state[\\clock] = nil; };\n"
+			"    if (state[\\flushNotes].notNil) { state[\\flushNotes].value; };\n"
+			"    if (state[\\activeNotes].notNil) { state[\\activeNotes].clear; };\n"
+			"    state[\\player] = nil;\n"
+			"    state[\\region] = nil;\n"
+			"    state[\\regionId] = nil;\n"
+			"    ~scardourTracks[trackId] = state;\n"
+			"};\n"
+			")\n",
+			string_literal (track_key (track))
+		);
+	}
+
 	return string_compose (
 		"(\n"
 		"var trackId = %1;\n"
-		"var state = ~ardourTracks[trackId];\n"
+		"var state = ~scardourTracks[trackId];\n"
 		"if (state.notNil) {\n"
 		"    if (state[\\player].notNil) {\n"
 		"        state[\\player].release;\n"
@@ -517,13 +730,14 @@ SuperColliderSessionRuntime::track_stop_code (SuperColliderTrack const& track) c
 		"    state[\\group] = nil;\n"
 		"    state[\\region] = nil;\n"
 		"    state[\\regionId] = nil;\n"
-		"    ~ardourTracks[trackId] = state;\n"
+		"    ~scardourTracks[trackId] = state;\n"
 		"};\n"
-		"    if (~ardourTrackGroup.notNil) {\n"
-		"        s.sendMsg(\"/g_deepFree\", ~ardourTrackGroup.nodeID);\n"
-		"        s.sendMsg(\"/n_free\", ~ardourTrackGroup.nodeID);\n"
-		"        ~ardourTrackGroup.freeAll;\n"
-		"        ~ardourTrackGroup.free;\n"
+		"    if (~scardourTrackGroup.notNil) {\n"
+		"        s.sendMsg(\"/g_deepFree\", ~scardourTrackGroup.nodeID);\n"
+		"        s.sendMsg(\"/n_free\", ~scardourTrackGroup.nodeID);\n"
+		"        ~scardourTrackGroup.freeAll;\n"
+		"        ~scardourTrackGroup.free;\n"
+		"        ~scardourTrackGroup = nil;\n"
 		"        ~ardourTrackGroup = nil;\n"
 		"    };\n"
 		"    if (~tone.notNil) {\n"
@@ -632,7 +846,27 @@ SuperColliderSessionRuntime::runtime_output (std::string text, size_t len)
 		return;
 	}
 
-	PBD::info << string_compose (_("SuperColliderSession: %1"), text.substr (0, len)) << endmsg;
+	_runtime_output_buffer += text.substr (0, len);
+
+	std::string::size_type newline = std::string::npos;
+	while ((newline = _runtime_output_buffer.find ('\n')) != std::string::npos) {
+		std::string line = _runtime_output_buffer.substr (0, newline);
+		_runtime_output_buffer.erase (0, newline + 1);
+
+		if (!line.empty () && line[line.size () - 1] == '\r') {
+			line.erase (line.size () - 1);
+		}
+
+		if (line.empty ()) {
+			continue;
+		}
+
+		if (handle_runtime_line (line)) {
+			continue;
+		}
+
+		PBD::info << string_compose (_("SuperColliderSession: %1"), line) << endmsg;
+	}
 }
 
 void
@@ -643,5 +877,6 @@ SuperColliderSessionRuntime::runtime_terminated ()
 	_active_tracks.clear ();
 	_active_regions.clear ();
 	_active_region_ends.clear ();
+	_runtime_output_buffer.clear ();
 	_last_error = _("sclang terminated unexpectedly");
 }

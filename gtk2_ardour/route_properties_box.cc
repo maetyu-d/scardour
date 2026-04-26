@@ -129,6 +129,7 @@ ProcessorUIFrame::save_state () const
 RoutePropertiesBox::RoutePropertiesBox ()
 	: _insert_box (nullptr)
 	, _supercollider_synthdef_label (_("SynthDef"))
+	, _supercollider_auto_synthdef_button (_("Auto-fill from source"))
 	, _supercollider_auto_boot_button (_("Auto-start runtime"))
 	, _supercollider_apply_button (_("Apply"))
 	, _supercollider_restart_button (_("Restart"))
@@ -167,6 +168,7 @@ RoutePropertiesBox::RoutePropertiesBox ()
 	_supercollider_controls.set_spacing (6);
 	_supercollider_controls.pack_start (_supercollider_synthdef_label, false, false);
 	_supercollider_controls.pack_start (_supercollider_synthdef_entry, true, true);
+	_supercollider_controls.pack_start (_supercollider_auto_synthdef_button, false, false);
 	_supercollider_controls.pack_start (_supercollider_auto_boot_button, false, false);
 	_supercollider_controls.pack_start (_supercollider_apply_button, false, false);
 	_supercollider_controls.pack_start (_supercollider_restart_button, false, false);
@@ -186,8 +188,9 @@ RoutePropertiesBox::RoutePropertiesBox ()
 	_supercollider_frame.hide ();
 
 	ARDOUR_UI::instance()->ActionsReady.connect_same_thread (_forever_connections, std::bind (&RoutePropertiesBox::ui_actions_ready, this));
-	_supercollider_source_buffer->signal_changed().connect (sigc::mem_fun (*this, &RoutePropertiesBox::mark_supercollider_editor_dirty));
+	_supercollider_source_buffer->signal_changed().connect (sigc::mem_fun (*this, &RoutePropertiesBox::supercollider_source_or_autofill_changed));
 	_supercollider_synthdef_entry.signal_changed().connect (sigc::mem_fun (*this, &RoutePropertiesBox::mark_supercollider_editor_dirty));
+	_supercollider_auto_synthdef_button.signal_toggled().connect (sigc::mem_fun (*this, &RoutePropertiesBox::supercollider_source_or_autofill_changed));
 	_supercollider_auto_boot_button.signal_toggled().connect (sigc::mem_fun (*this, &RoutePropertiesBox::mark_supercollider_editor_dirty));
 	_supercollider_apply_button.signal_clicked().connect (sigc::mem_fun (*this, &RoutePropertiesBox::apply_supercollider_changes));
 	_supercollider_restart_button.signal_clicked().connect (sigc::mem_fun (*this, &RoutePropertiesBox::restart_supercollider_runtime));
@@ -456,8 +459,6 @@ RoutePropertiesBox::sync_supercollider_editor ()
 	std::string status_text;
 	if (_supercollider_dirty) {
 		status_text = _("Runtime status: unsaved changes");
-	} else if (sct->supercollider_generates_midi ()) {
-		status_text = _("Runtime status: MIDI render track");
 	} else if (sct->supercollider_runtime_running ()) {
 		status_text = _("Runtime status: running");
 	} else if (!sct->supercollider_runtime_last_error ().empty ()) {
@@ -470,6 +471,14 @@ RoutePropertiesBox::sync_supercollider_editor ()
 
 	_updating_supercollider_ui = true;
 	_supercollider_synthdef_entry.set_text (sct->supercollider_synthdef ());
+	_supercollider_auto_synthdef_button.set_active (sct->supercollider_auto_synthdef ());
+	_supercollider_auto_synthdef_button.set_sensitive (!sct->supercollider_generates_midi ());
+	if (sct->supercollider_generates_midi ()) {
+		_supercollider_auto_synthdef_button.hide ();
+	} else {
+		_supercollider_auto_synthdef_button.show ();
+	}
+	_supercollider_synthdef_entry.set_sensitive (!sct->supercollider_auto_synthdef ());
 	_supercollider_auto_boot_button.set_active (sct->supercollider_auto_boot ());
 	_supercollider_auto_boot_button.set_sensitive (sct->supports_live_runtime ());
 	_supercollider_source_buffer->set_text (sct->supercollider_source ());
@@ -497,6 +506,33 @@ RoutePropertiesBox::mark_supercollider_editor_dirty ()
 }
 
 void
+RoutePropertiesBox::supercollider_source_or_autofill_changed ()
+{
+	if (_updating_supercollider_ui) {
+		return;
+	}
+
+	std::shared_ptr<SuperColliderTrack> sct = std::dynamic_pointer_cast<SuperColliderTrack> (_route);
+	if (!sct) {
+		return;
+	}
+
+	if (!sct->supercollider_generates_midi () && _supercollider_auto_synthdef_button.get_active ()) {
+		_supercollider_synthdef_entry.set_sensitive (false);
+		std::string const inferred = SuperColliderTrack::infer_supercollider_synthdef (_supercollider_source_buffer->get_text ());
+		if (!inferred.empty () && _supercollider_synthdef_entry.get_text () != inferred) {
+			_updating_supercollider_ui = true;
+			_supercollider_synthdef_entry.set_text (inferred);
+			_updating_supercollider_ui = false;
+		}
+	} else {
+		_supercollider_synthdef_entry.set_sensitive (true);
+	}
+
+	mark_supercollider_editor_dirty ();
+}
+
+void
 RoutePropertiesBox::apply_supercollider_changes ()
 {
 	std::shared_ptr<SuperColliderTrack> sct = std::dynamic_pointer_cast<SuperColliderTrack> (_route);
@@ -504,9 +540,12 @@ RoutePropertiesBox::apply_supercollider_changes ()
 		return;
 	}
 
-	sct->set_supercollider_synthdef (_supercollider_synthdef_entry.get_text ());
+	sct->set_supercollider_auto_synthdef (_supercollider_auto_synthdef_button.get_active ());
 	sct->set_supercollider_auto_boot (_supercollider_auto_boot_button.get_active ());
 	sct->set_supercollider_source (_supercollider_source_buffer->get_text ());
+	if (!sct->supercollider_auto_synthdef ()) {
+		sct->set_supercollider_synthdef (_supercollider_synthdef_entry.get_text ());
+	}
 
 	_supercollider_dirty = false;
 	sync_supercollider_editor ();

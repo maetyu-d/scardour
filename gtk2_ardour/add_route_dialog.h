@@ -88,6 +88,7 @@ public:
 
 	ARDOUR::TrackMode   mode ();
 	std::shared_ptr<ARDOUR::RouteGroup> route_group ();
+	bool create_sc_midi_companion_track () const;
 
 	RouteDialogs::InsertAt insert_at ();
 	bool                   use_strict_io ();
@@ -118,6 +119,7 @@ private:
 	Gtk::ComboBoxText  insert_at_combo;
 	Gtk::ComboBoxText  strict_io_combo;
 	Gtk::CheckButton   show_on_cue_chkbox;
+	Gtk::CheckButton   sc_midi_companion_chkbox;
 
 	void        track_type_chosen ();
 	std::string type_wanted_to_localized_string (TypeWanted type_wanted);
@@ -131,6 +133,7 @@ private:
 	bool        route_separator (const Glib::RefPtr<Gtk::TreeModel>& m, const Gtk::TreeModel::iterator& i);
 	void        maybe_update_name_template_entry ();
 	void        instrument_changed ();
+	void        sc_midi_companion_changed ();
 
 	struct TrackTemplateColumns : public Gtk::TreeModel::ColumnRecord {
 		TrackTemplateColumns ()
