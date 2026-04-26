@@ -3,7 +3,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
-#include <fstream>
 #include <limits>
 #include <sstream>
 
@@ -28,18 +27,6 @@ using namespace ARDOUR;
 namespace {
 
 uint64_t sc_runtime_script_counter = 0;
-
-void
-sc_runtime_log (std::string const& message)
-{
-	std::string const path = ARDOUR::user_config_directory () + G_DIR_SEPARATOR_S + "supercollider_runtime.log";
-	std::ofstream out (path.c_str (), std::ios::app);
-	if (!out) {
-		return;
-	}
-
-	out << message << std::endl;
-}
 
 std::string
 sc_string_literal (std::string const& value)
@@ -146,14 +133,12 @@ bool
 SuperColliderSessionRuntime::activate_track (SuperColliderTrack const& track)
 {
 	if (!ensure_started ()) {
-		sc_runtime_log (string_compose ("activate_track failed name='%1' error='%2'", track.name (), _last_error));
 		return false;
 	}
 
 	_active_tracks[track_key (track)] = &track;
 	_active_regions.erase (track_key (track));
 	_active_region_ends.erase (track_key (track));
-	sc_runtime_log (string_compose ("activate_track name='%1' key='%2'", track.name (), track_key (track)));
 	poll_transport ();
 	_last_error.clear ();
 	return true;
@@ -163,7 +148,6 @@ void
 SuperColliderSessionRuntime::deactivate_track (SuperColliderTrack const& track)
 {
 	std::string const key = track_key (track);
-	sc_runtime_log (string_compose ("deactivate_track name='%1' key='%2'", track.name (), key));
 	if (running () && _active_regions.find (key) != _active_regions.end ()) {
 		send_code (track_stop_code (track));
 	}
@@ -291,7 +275,6 @@ SuperColliderSessionRuntime::ensure_started ()
 	std::string const path = runtime_path ();
 	if (path.empty ()) {
 		_last_error = _("sclang not found");
-		sc_runtime_log ("ensure_started: sclang not found");
 		return false;
 	}
 
@@ -309,20 +292,16 @@ SuperColliderSessionRuntime::ensure_started ()
 
 	if (_runtime->start (SystemExec::MergeWithStdin)) {
 		_last_error = _("could not launch sclang");
-		sc_runtime_log ("ensure_started: could not launch sclang");
 		_runtime_connections.drop_connections ();
 		_runtime.reset ();
 		return false;
 	}
-	sc_runtime_log (string_compose ("ensure_started: launched sclang path='%1'", path));
 
 	if (!send_code (bootstrap_code ())) {
 		_last_error = _("could not initialize sclang");
-		sc_runtime_log ("ensure_started: could not send bootstrap code");
 		stop ();
 		return false;
 	}
-	sc_runtime_log ("ensure_started: bootstrap code sent");
 
 	sync_transport_state ();
 	_last_error.clear ();
@@ -333,7 +312,6 @@ bool
 SuperColliderSessionRuntime::send_code (std::string const& code)
 {
 	if (!running ()) {
-		sc_runtime_log ("send_code skipped: runtime not running");
 		return false;
 	}
 
@@ -342,16 +320,11 @@ SuperColliderSessionRuntime::send_code (std::string const& code)
 	std::string const script_path = ARDOUR::user_cache_directory () + G_DIR_SEPARATOR_S + script_name.str ();
 
 	if (!g_file_set_contents (script_path.c_str (), code.c_str (), code.size (), 0)) {
-		sc_runtime_log (string_compose ("send_code failed: could not write script '%1'", script_path));
 		return false;
 	}
 
 	std::string const command = string_compose ("%1.load;\n", sc_string_literal (script_path));
-	bool const ok = _runtime->write_to_stdin (command) > 0;
-	sc_runtime_log (string_compose ("send_code ok=%1 snippet='%2'",
-		ok ? 1 : 0,
-		code.substr (0, std::min<size_t> (120, code.size ()))));
-	return ok;
+	return _runtime->write_to_stdin (command) > 0;
 }
 
 std::string
@@ -526,11 +499,8 @@ SuperColliderSessionRuntime::track_stop_code (SuperColliderTrack const& track) c
 		"(\n"
 		"var trackId = %1;\n"
 		"var state = ~ardourTracks[trackId];\n"
-		"(\"[ArdourStop] track=\" ++ trackId ++ \" stateNil=\" ++ state.isNil).postln;\n"
 		"if (state.notNil) {\n"
-		"    (\"[ArdourStop] track=\" ++ trackId ++ \" player=\" ++ state[\\player] ++ \" group=\" ++ state[\\group]).postln;\n"
 		"    if (state[\\player].notNil) {\n"
-		"        (\"[ArdourStop] playerNode=\" ++ state[\\player].nodeID).postln;\n"
 		"        state[\\player].release;\n"
 		"        s.sendMsg(\"/n_set\", state[\\player].nodeID, \"gate\", 0);\n"
 		"        s.sendMsg(\"/n_free\", state[\\player].nodeID);\n"
@@ -538,7 +508,6 @@ SuperColliderSessionRuntime::track_stop_code (SuperColliderTrack const& track) c
 		"        state[\\player] = nil;\n"
 		"    };\n"
 		"    if (state[\\group].notNil) {\n"
-		"        (\"[ArdourStop] groupNode=\" ++ state[\\group].nodeID).postln;\n"
 		"        s.sendMsg(\"/g_deepFree\", state[\\group].nodeID);\n"
 		"        s.sendMsg(\"/n_free\", state[\\group].nodeID);\n"
 		"        state[\\group].freeAll;\n"
@@ -551,7 +520,6 @@ SuperColliderSessionRuntime::track_stop_code (SuperColliderTrack const& track) c
 		"    ~ardourTracks[trackId] = state;\n"
 		"};\n"
 		"    if (~ardourTrackGroup.notNil) {\n"
-		"        (\"[ArdourStop] globalGroupNode=\" ++ ~ardourTrackGroup.nodeID).postln;\n"
 		"        s.sendMsg(\"/g_deepFree\", ~ardourTrackGroup.nodeID);\n"
 		"        s.sendMsg(\"/n_free\", ~ardourTrackGroup.nodeID);\n"
 		"        ~ardourTrackGroup.freeAll;\n"
@@ -559,7 +527,6 @@ SuperColliderSessionRuntime::track_stop_code (SuperColliderTrack const& track) c
 		"        ~ardourTrackGroup = nil;\n"
 		"    };\n"
 		"    if (~tone.notNil) {\n"
-		"        (\"[ArdourStop] globalToneNode=\" ++ ~tone.nodeID).postln;\n"
 		"        ~tone.release;\n"
 		"        s.sendMsg(\"/n_set\", ~tone.nodeID, \"gate\", 0);\n"
 		"        s.sendMsg(\"/n_free\", ~tone.nodeID);\n"
@@ -613,7 +580,6 @@ SuperColliderSessionRuntime::poll_transport ()
 	if (!_session.transport_state_rolling ()) {
 		for (std::map<std::string, SuperColliderTrack const*>::const_iterator i = _active_tracks.begin (); i != _active_tracks.end (); ++i) {
 			if (_active_regions.find (i->first) != _active_regions.end ()) {
-				sc_runtime_log (string_compose ("poll_transport stop track='%1' reason='transport stopped'", i->second->name ()));
 				send_code (track_stop_code (*i->second));
 			}
 		}
@@ -629,9 +595,6 @@ SuperColliderSessionRuntime::poll_transport ()
 		if (end_it != _active_region_ends.end () && now >= end_it->second) {
 			std::string const current_region_id = _active_regions[i->first];
 			if (!current_region_id.empty ()) {
-				sc_runtime_log (string_compose (
-					"poll_transport stop track='%1' old_region='%2' reason='reached end' sample=%3 end=%4",
-					i->second->name (), current_region_id, now, end_it->second));
 				send_code (track_stop_code (*i->second));
 			}
 			_active_regions.erase (i->first);
@@ -647,20 +610,15 @@ SuperColliderSessionRuntime::poll_transport ()
 		}
 
 		if (!current_region_id.empty ()) {
-			sc_runtime_log (string_compose ("poll_transport stop track='%1' old_region='%2'", i->second->name (), current_region_id));
 			send_code (track_stop_code (*i->second));
 			_active_region_ends.erase (i->first);
 		}
 
 		if (region) {
-			sc_runtime_log (string_compose (
-				"poll_transport play track='%1' region='%2' region_id='%3' sample=%4",
-				i->second->name (), region->name (), next_region_id, now));
 			send_code (track_play_region_code (*i->second, *region));
 			_active_regions[i->first] = next_region_id;
 			_active_region_ends[i->first] = region->position_sample () + region->length_samples ();
 		} else {
-			sc_runtime_log (string_compose ("poll_transport idle track='%1' sample=%2", i->second->name (), now));
 			_active_regions.erase (i->first);
 			_active_region_ends.erase (i->first);
 		}
@@ -674,14 +632,12 @@ SuperColliderSessionRuntime::runtime_output (std::string text, size_t len)
 		return;
 	}
 
-	sc_runtime_log (string_compose ("runtime_output '%1'", text.substr (0, len)));
 	PBD::info << string_compose (_("SuperColliderSession: %1"), text.substr (0, len)) << endmsg;
 }
 
 void
 SuperColliderSessionRuntime::runtime_terminated ()
 {
-	sc_runtime_log ("runtime_terminated");
 	_runtime_connections.drop_connections ();
 	_runtime.reset ();
 	_active_tracks.clear ();
