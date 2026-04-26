@@ -21,7 +21,11 @@
 #include <algorithm>
 #include <atomic>
 #include <fstream>
+#include <sstream>
+#include <signal.h>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include <glib.h>
@@ -41,7 +45,9 @@
 #include "ardour/tempo.h"
 
 #include "gui_thread.h"
+#include "editor.h"
 #include "public_editor.h"
+#include "region_view.h"
 #include "supercollider_track_editor.h"
 #include "ui_config.h"
 
@@ -105,6 +111,10 @@ SuperColliderTrackEditor::SuperColliderTrackEditor (std::shared_ptr<Route> route
 	_apply_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::apply_changes));
 	_restart_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::restart_runtime));
 	_render_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::render_to_timeline));
+	Editor* editor = dynamic_cast<Editor*> (&PublicEditor::instance ());
+	if (editor) {
+		editor->get_selection ().RegionsChanged.connect (sigc::mem_fun (*this, &SuperColliderTrackEditor::region_selection_changed));
+	}
 
 	_vbox.show_all ();
 	set_position (UIConfiguration::instance ().get_default_window_position ());
@@ -169,6 +179,18 @@ SuperColliderTrackEditor::route_going_away ()
 }
 
 void
+SuperColliderTrackEditor::region_selection_changed ()
+{
+	if (_dirty) {
+		update_title ();
+		return;
+	}
+
+	sync_editor ();
+	update_title ();
+}
+
+void
 SuperColliderTrackEditor::update_title ()
 {
 	if (!_route) {
@@ -176,7 +198,52 @@ SuperColliderTrackEditor::update_title ()
 		return;
 	}
 
-	set_title (string_compose ("%1: %2", _route->name (), _("SuperCollider Track Editor")));
+	std::shared_ptr<ARDOUR::Region> const region = selected_region ();
+	if (region) {
+		set_title (string_compose ("%1: %2 (%3)", _route->name (), _("SuperCollider Track Editor"), region->name ()));
+	} else {
+		set_title (string_compose ("%1: %2", _route->name (), _("SuperCollider Track Editor")));
+	}
+}
+
+std::shared_ptr<ARDOUR::Region>
+SuperColliderTrackEditor::selected_region () const
+{
+	std::shared_ptr<SuperColliderTrack> const sct = std::dynamic_pointer_cast<SuperColliderTrack> (_route);
+	if (!sct) {
+		return std::shared_ptr<ARDOUR::Region> ();
+	}
+
+	Editor* editor = dynamic_cast<Editor*> (&PublicEditor::instance ());
+	if (!editor) {
+		return std::shared_ptr<ARDOUR::Region> ();
+	}
+
+	std::shared_ptr<Playlist> const playlist = sct->playlist ();
+	if (!playlist) {
+		return std::shared_ptr<ARDOUR::Region> ();
+	}
+
+	std::shared_ptr<ARDOUR::Region> match;
+	RegionSelection const& selection = editor->get_selection ().regions;
+	for (RegionSelection::const_iterator i = selection.begin (); i != selection.end (); ++i) {
+		if (!*i) {
+			continue;
+		}
+
+		std::shared_ptr<ARDOUR::Region> const region = (*i)->region ();
+		if (!region || region->playlist () != playlist) {
+			continue;
+		}
+
+		if (match) {
+			return std::shared_ptr<ARDOUR::Region> ();
+		}
+
+		match = region;
+	}
+
+	return match;
 }
 
 void
@@ -192,6 +259,7 @@ SuperColliderTrackEditor::sync_editor ()
 	}
 
 	std::string status_text;
+	std::shared_ptr<ARDOUR::Region> const region = selected_region ();
 	if (_dirty) {
 		status_text = _("Runtime status: unsaved changes");
 	} else if (sct->supercollider_runtime_running ()) {
@@ -205,7 +273,15 @@ SuperColliderTrackEditor::sync_editor ()
 	}
 
 	_updating = true;
-	_synthdef_entry.set_text (sct->supercollider_synthdef ());
+	std::string const source_text = region ? sct->supercollider_source_for_region (*region) : sct->supercollider_source ();
+	std::string synthdef_text = region ? sct->supercollider_synthdef_for_region (*region) : sct->supercollider_synthdef ();
+	if (sct->supercollider_auto_synthdef () && !sct->supercollider_generates_midi ()) {
+		std::string const inferred = SuperColliderTrack::infer_supercollider_synthdef (source_text);
+		if (!inferred.empty ()) {
+			synthdef_text = inferred;
+		}
+	}
+	_synthdef_entry.set_text (synthdef_text);
 	_auto_synthdef_button.set_active (sct->supercollider_auto_synthdef ());
 	_auto_synthdef_button.set_sensitive (!sct->supercollider_generates_midi ());
 	if (sct->supercollider_generates_midi ()) {
@@ -216,7 +292,7 @@ SuperColliderTrackEditor::sync_editor ()
 	_synthdef_entry.set_sensitive (!sct->supercollider_auto_synthdef ());
 	_auto_boot_button.set_active (sct->supercollider_auto_boot ());
 	_auto_boot_button.set_sensitive (sct->supports_live_runtime ());
-	_source_buffer->set_text (sct->supercollider_source ());
+	_source_buffer->set_text (source_text);
 	_status_label.set_text (status_text);
 	_render_button.set_label (sct->supercollider_generates_midi () ? _("Render To MIDI Track") : _("Render To Timeline"));
 	_apply_button.set_sensitive (_dirty);
@@ -278,9 +354,16 @@ SuperColliderTrackEditor::apply_changes ()
 
 	sct->set_supercollider_auto_synthdef (_auto_synthdef_button.get_active ());
 	sct->set_supercollider_auto_boot (_auto_boot_button.get_active ());
-	sct->set_supercollider_source (_source_buffer->get_text ());
-	if (!sct->supercollider_auto_synthdef ()) {
-		sct->set_supercollider_synthdef (_synthdef_entry.get_text ());
+	std::shared_ptr<ARDOUR::Region> const region = selected_region ();
+	if (region) {
+		region->set_supercollider_source (_source_buffer->get_text ());
+		region->set_supercollider_synthdef (_synthdef_entry.get_text ());
+		region->set_name (sct->supercollider_clip_name (*region));
+	} else {
+		sct->set_supercollider_source (_source_buffer->get_text ());
+		if (!sct->supercollider_auto_synthdef ()) {
+			sct->set_supercollider_synthdef (_synthdef_entry.get_text ());
+		}
 	}
 
 	_dirty = false;
@@ -309,11 +392,14 @@ namespace {
 struct RenderClipTask {
 	std::string clip_name;
 	std::string clip_id;
+	std::string synthdef;
+	std::string source;
 	timepos_t position;
 	ARDOUR::samplecnt_t length_samples;
 	double duration;
 	std::string render_path;
 	std::string script_path;
+	std::string log_path;
 };
 
 struct RenderClipOutput {
@@ -330,6 +416,8 @@ struct RenderWorkResult {
 struct MidiRenderClipTask {
 	std::string clip_name;
 	std::string clip_id;
+	std::string synthdef;
+	std::string source;
 	timepos_t position;
 	ARDOUR::samplepos_t position_samples;
 	ARDOUR::samplecnt_t length_samples;
@@ -389,6 +477,127 @@ sc_string_literal (std::string const& value)
 	return escaped;
 }
 
+std::string
+normalize_language_script_source (std::string const& source)
+{
+	std::istringstream input (source);
+	std::string line;
+	std::string normalized;
+	bool first = true;
+
+	while (std::getline (input, line)) {
+		std::string trimmed = line;
+		std::string::size_type begin = trimmed.find_first_not_of (" \t\r");
+		if (begin == std::string::npos) {
+			begin = 0;
+		}
+		std::string::size_type end = trimmed.find_last_not_of (" \t\r");
+		if (end == std::string::npos) {
+			trimmed.clear ();
+		} else {
+			trimmed = trimmed.substr (begin, end - begin + 1);
+		}
+
+		if (trimmed == "(" || trimmed == ")") {
+			continue;
+		}
+
+		if (!first) {
+			normalized += "\n";
+		}
+		normalized += line;
+		first = false;
+	}
+
+	return normalized.empty () ? source : normalized;
+}
+
+std::string
+shell_quote (std::string const& value)
+{
+	std::string quoted = "'";
+
+	for (std::string::const_iterator i = value.begin (); i != value.end (); ++i) {
+		if (*i == '\'') {
+			quoted += "'\\''";
+		} else {
+			quoted += *i;
+		}
+	}
+
+	quoted += "'";
+	return quoted;
+}
+
+bool
+run_process_with_timeout (std::string const& command, double timeout_seconds, int& exit_status, bool& timed_out, std::string& error_message)
+{
+	gchar* argv[] = {
+		g_strdup ("/bin/sh"),
+		g_strdup ("-c"),
+		g_strdup (command.c_str ()),
+		0
+	};
+	GError* error = 0;
+	GPid pid = 0;
+
+	bool const ok = g_spawn_async (
+		0,
+		argv,
+		0,
+		GSpawnFlags (G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD),
+		0,
+		0,
+		&pid,
+		&error
+	);
+
+	g_free (argv[0]);
+	g_free (argv[1]);
+	g_free (argv[2]);
+
+	if (!ok) {
+		if (error && error->message) {
+			error_message = error->message;
+		} else {
+			error_message = _("could not start SuperCollider render");
+		}
+		if (error) {
+			g_error_free (error);
+		}
+		return false;
+	}
+
+	timed_out = false;
+	exit_status = -1;
+	int status = 0;
+	int const sleep_usecs = 100000;
+	int const max_polls = std::max (1, static_cast<int> ((timeout_seconds * 1000000.0) / sleep_usecs));
+
+	for (int poll = 0; poll < max_polls; ++poll) {
+		pid_t const wait_result = ::waitpid (pid, &status, WNOHANG);
+		if (wait_result == pid) {
+			exit_status = status;
+			g_spawn_close_pid (pid);
+			return true;
+		}
+		if (wait_result < 0) {
+			error_message = _("could not wait for SuperCollider render");
+			g_spawn_close_pid (pid);
+			return false;
+		}
+		g_usleep (sleep_usecs);
+	}
+
+	timed_out = true;
+	::kill (pid, SIGKILL);
+	if (::waitpid (pid, &status, 0) == pid) {
+		exit_status = status;
+	}
+	g_spawn_close_pid (pid);
+	return true;
+}
+
 bool
 source_looks_like_language_script (std::string const& source)
 {
@@ -423,14 +632,38 @@ split_synthdef_prelude (std::string const& source, std::string& prelude, std::st
 		return false;
 	}
 
-	std::string::size_type const add_pos = source.find (".add;", synthdef_pos);
-	if (add_pos == std::string::npos) {
+	std::string::size_type const playback_pos = source.find (".play", synthdef_pos);
+	std::string::size_type search_pos = synthdef_pos;
+	std::string::size_type last_add_pos = std::string::npos;
+
+	while (true) {
+		std::string::size_type const add_pos = source.find (".add;", search_pos);
+		if (add_pos == std::string::npos) {
+			break;
+		}
+		if (playback_pos != std::string::npos && add_pos > playback_pos) {
+			break;
+		}
+		last_add_pos = add_pos;
+		search_pos = add_pos + 5;
+	}
+
+	if (last_add_pos == std::string::npos) {
 		return false;
 	}
 
-	std::string::size_type split_pos = add_pos + 5;
-	while (split_pos < source.size () && (source[split_pos] == '\n' || source[split_pos] == '\r')) {
-		++split_pos;
+	std::string::size_type split_pos = last_add_pos + 5;
+	while (split_pos < source.size ()) {
+		char const c = source[split_pos];
+		if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+			++split_pos;
+			continue;
+		}
+		if (c == ')' || c == ';') {
+			++split_pos;
+			continue;
+		}
+		break;
 	}
 
 	prelude = source.substr (0, split_pos);
@@ -489,6 +722,38 @@ parse_sc_midi_notes (std::string const& path, std::vector<MidiRenderNote>& notes
 	return true;
 }
 
+std::vector<std::shared_ptr<ARDOUR::Region> >
+selected_regions_for_track (std::shared_ptr<SuperColliderTrack> const& sct)
+{
+	std::vector<std::shared_ptr<ARDOUR::Region> > regions;
+	if (!sct) {
+		return regions;
+	}
+
+	Editor* editor = dynamic_cast<Editor*> (&PublicEditor::instance ());
+	if (!editor) {
+		return regions;
+	}
+
+	std::shared_ptr<Playlist> const playlist = sct->playlist ();
+	if (!playlist) {
+		return regions;
+	}
+
+	RegionSelection const& selection = editor->get_selection ().regions;
+	if (selection.empty ()) {
+		return regions;
+	}
+
+	playlist->foreach_region ([&regions, &selection] (std::shared_ptr<ARDOUR::Region> region) {
+		if (region && selection.contains (region)) {
+			regions.push_back (region);
+		}
+	});
+
+	return regions;
+}
+
 }
 
 void
@@ -520,12 +785,15 @@ SuperColliderTrackEditor::render_to_timeline ()
 		return;
 	}
 
-	std::vector<std::shared_ptr<Region> > clips;
-	source_playlist->foreach_region ([&clips] (std::shared_ptr<Region> region) {
-		if (region) {
-			clips.push_back (region);
-		}
-	});
+	std::vector<std::shared_ptr<Region> > clips = selected_regions_for_track (sct);
+	bool const using_selection = !clips.empty ();
+	if (!using_selection) {
+		source_playlist->foreach_region ([&clips] (std::shared_ptr<Region> region) {
+			if (region) {
+				clips.push_back (region);
+			}
+		});
+	}
 
 	if (clips.empty ()) {
 		_render_in_progress = false;
@@ -576,12 +844,6 @@ SuperColliderTrackEditor::render_to_timeline ()
 	double const sample_rate = session.sample_rate ();
 	std::string const track_id = sct->id ().to_s ();
 	std::string const track_name = sct->name ();
-	std::string const synthdef = sct->supercollider_synthdef ();
-	std::string const source = sct->supercollider_source ();
-	bool const source_is_language_script = source_looks_like_language_script (source);
-	std::string synthdef_prelude;
-	std::string synthdef_body;
-	bool const split_synthdef = source_is_language_script && split_synthdef_prelude (source, synthdef_prelude, synthdef_body);
 
 	for (std::vector<std::shared_ptr<Region> >::const_iterator i = clips.begin (); i != clips.end (); ++i) {
 		std::shared_ptr<Region> const clip = *i;
@@ -594,11 +856,14 @@ SuperColliderTrackEditor::render_to_timeline ()
 		RenderClipTask task;
 		task.clip_name = clip->name ();
 		task.clip_id = clip->id ().to_s ();
+		task.synthdef = sct->supercollider_synthdef_for_region (*clip);
+		task.source = normalize_language_script_source (sct->supercollider_source_for_region (*clip));
 		task.position = clip->position ();
 		task.length_samples = clip->length_samples ();
 		task.duration = duration;
 		task.render_path = Glib::build_filename (sound_path, base_name + ".wav");
 		task.script_path = Glib::build_filename (sound_path, base_name + ".scd");
+		task.log_path = Glib::build_filename (sound_path, base_name + ".log");
 		render_tasks.push_back (task);
 	}
 
@@ -608,15 +873,23 @@ SuperColliderTrackEditor::render_to_timeline ()
 		return;
 	}
 
-	_status_label.set_text (string_compose (_("Render status: rendering %1 clip(s)..."), render_tasks.size ()));
+	if (using_selection) {
+		_status_label.set_text (string_compose (_("Render status: rendering %1 selected clip(s)..."), render_tasks.size ()));
+	} else {
+		_status_label.set_text (string_compose (_("Render status: rendering %1 clip(s)..."), render_tasks.size ()));
+	}
 	_apply_button.set_sensitive (false);
 	_restart_button.set_sensitive (false);
 	_render_button.set_sensitive (false);
 
-	std::thread ([this, render_tasks, runtime_path, sample_rate, track_id, track_name, synthdef, source, source_is_language_script, split_synthdef, synthdef_prelude, synthdef_body, render_track_name] () {
+	std::thread ([this, render_tasks, runtime_path, sample_rate, track_id, track_name, render_track_name] () {
 		std::shared_ptr<RenderWorkResult> result (new RenderWorkResult);
 
 		for (std::vector<RenderClipTask>::const_iterator i = render_tasks.begin (); i != render_tasks.end (); ++i) {
+			bool const source_is_language_script = source_looks_like_language_script (i->source);
+			std::string synthdef_prelude;
+			std::string synthdef_body;
+			bool const split_synthdef = source_is_language_script && split_synthdef_prelude (i->source, synthdef_prelude, synthdef_body);
 			std::ofstream script (i->script_path.c_str (), std::ios::out | std::ios::trunc);
 			if (!script) {
 				result->failure_reason = _("could not write SuperCollider render script");
@@ -624,27 +897,26 @@ SuperColliderTrackEditor::render_to_timeline ()
 			}
 
 			script
-				<< "(\n"
-				<< "var outputPath = " << sc_string_literal (i->render_path) << ";\n"
-				<< "var sampleRate = " << sample_rate << ";\n"
-				<< "var duration = " << i->duration << ";\n"
+				<< "~scardourOutputPath = " << sc_string_literal (i->render_path) << ";\n"
+				<< "~scardourSampleRate = " << sample_rate << ";\n"
+				<< "~scardourDuration = " << i->duration << ";\n"
 				<< "Server.killAll;\n"
 				<< "s = Server.local;\n"
-				<< "s.options.sampleRate = sampleRate;\n"
+				<< "s.options.sampleRate = ~scardourSampleRate;\n"
 				<< "s.options.numOutputBusChannels = 2;\n"
 				<< "s.options.numInputBusChannels = 2;\n"
 				<< "s.waitForBoot({\n"
-				<< "    s.record(path: outputPath, numChannels: 2);\n"
+				<< "    s.record(path: ~scardourOutputPath, numChannels: 2);\n"
 				<< "    ~scardourTracks = IdentityDictionary.new;\n"
 				<< "    ~ardourTracks = ~scardourTracks;\n"
 				<< "    ~scardourTrackId = " << sc_string_literal (track_id) << ";\n"
 				<< "    ~scardourTrackName = " << sc_string_literal (track_name) << ";\n"
-				<< "    ~scardourSynthDef = " << sc_string_literal (synthdef) << ";\n"
+				<< "    ~scardourSynthDef = " << sc_string_literal (i->synthdef) << ";\n"
 				<< "    ~scardourRegionId = " << sc_string_literal (i->clip_id) << ";\n"
 				<< "    ~scardourRegionName = " << sc_string_literal (i->clip_name) << ";\n"
 				<< "    ~scardourRegionStart = 0;\n"
 				<< "    ~scardourRegionEnd = " << i->length_samples << ";\n"
-				<< "    ~scardourRegionDuration = duration;\n"
+				<< "    ~scardourRegionDuration = ~scardourDuration;\n"
 				<< "    ~ardourTrackId = ~scardourTrackId;\n"
 				<< "    ~ardourTrackName = ~scardourTrackName;\n"
 				<< "    ~ardourSynthDef = ~scardourSynthDef;\n"
@@ -654,31 +926,60 @@ SuperColliderTrackEditor::render_to_timeline ()
 				<< "    ~ardourRegionEnd = ~scardourRegionEnd;\n"
 				<< "    ~ardourRegionDuration = ~scardourRegionDuration;\n"
 				<< "    ~scardourTrackGroup = Group.tail(s);\n"
-				<< "    ~ardourTrackGroup = ~scardourTrackGroup;\n";
+				<< "    ~ardourTrackGroup = ~scardourTrackGroup;\n"
+				<< "    ~scardourRenderPlayer = nil;\n"
+				<< "    ~ardourRenderPlayer = nil;\n";
 
 			if (source_is_language_script) {
 				if (split_synthdef) {
 					script
 						<< synthdef_prelude << "\n"
 						<< "    s.sync;\n"
-						<< synthdef_body << "\n";
+						<< "    ~scardourRenderResult = {\n"
+						<< synthdef_body << "\n"
+						<< "    }.value;\n";
 				} else {
-					script << source << "\n";
+					script
+						<< "    ~scardourRenderResult = {\n"
+						<< i->source << "\n"
+						<< "    }.value;\n";
 				}
+				script
+					<< "    if (~scardourRenderResult.notNil) {\n"
+					<< "        ~scardourRenderPlayer = ~scardourRenderResult;\n"
+					<< "        ~ardourRenderPlayer = ~scardourRenderPlayer;\n"
+					<< "    };\n"
+					<< "    if (~tone.notNil) {\n"
+					<< "        ~scardourRenderPlayer = ~tone;\n"
+					<< "        ~ardourRenderPlayer = ~scardourRenderPlayer;\n"
+					<< "    };\n";
 			} else {
 				script
 					<< "    ~scardourRenderPlayer = {\n"
-					<< source << "\n"
+					<< i->source << "\n"
 					<< "    }.play(target: ~scardourTrackGroup);\n"
 					<< "    ~ardourRenderPlayer = ~scardourRenderPlayer;\n";
 			}
 
 			script
-				<< "    SystemClock.sched(duration.max(0.05), {\n"
+				<< "    SystemClock.sched(~scardourDuration.max(0.05), {\n"
+				<< "        if (~scardourRenderPlayer.notNil) {\n"
+				<< "            if (~scardourRenderPlayer.respondsTo(\\stop)) { ~scardourRenderPlayer.stop; };\n"
+				<< "            if (~scardourRenderPlayer.respondsTo(\\release)) { ~scardourRenderPlayer.release; };\n"
+				<< "            if (~scardourRenderPlayer.respondsTo(\\free)) { ~scardourRenderPlayer.free; };\n"
+				<< "            ~scardourRenderPlayer = nil;\n"
+				<< "            ~ardourRenderPlayer = nil;\n"
+				<< "        };\n"
+				<< "        if (~tone.notNil) {\n"
+				<< "            if (~tone.respondsTo(\\release)) { ~tone.release; };\n"
+				<< "            if (~tone.respondsTo(\\free)) { ~tone.free; };\n"
+				<< "            ~tone = nil;\n"
+				<< "        };\n"
 				<< "        if (~scardourTrackGroup.notNil) {\n"
 				<< "            ~scardourTrackGroup.freeAll;\n"
 				<< "            ~scardourTrackGroup.free;\n"
 				<< "        };\n"
+				<< "        CmdPeriod.run;\n"
 				<< "        s.stopRecording;\n"
 				<< "        s.freeAll;\n"
 				<< "        s.quit;\n"
@@ -686,43 +987,34 @@ SuperColliderTrackEditor::render_to_timeline ()
 				<< "        nil;\n"
 				<< "    });\n"
 				<< "});\n"
-				<< "s.boot;\n"
-				<< ")\n";
+				<< "s.boot;\n";
 
 			script.close ();
 
-			gchar* argv[] = {
-				g_strdup (runtime_path.c_str ()),
-				g_strdup (i->script_path.c_str ()),
-				0
-			};
-			gchar* standard_output = 0;
-			gchar* standard_error = 0;
-			gint exit_status = 0;
-			GError* error = 0;
+			std::string const command =
+				shell_quote (runtime_path) + " " +
+				shell_quote (i->script_path) + " > " +
+				shell_quote (i->log_path) + " 2>&1";
+			int exit_status = 0;
+			bool timed_out = false;
+			std::string spawn_error;
+			double const timeout_seconds = std::max (15.0, i->duration + 10.0);
+			bool const ok = run_process_with_timeout (command, timeout_seconds, exit_status, timed_out, spawn_error);
 
-			bool const ok = g_spawn_sync (
-				0,
-				argv,
-				0,
-				G_SPAWN_SEARCH_PATH,
-				0,
-				0,
-				&standard_output,
-				&standard_error,
-				&exit_status,
-				&error
-			);
-
-			g_free (argv[0]);
-			g_free (argv[1]);
-
-			if (!ok || exit_status != 0 || !g_file_test (i->render_path.c_str (), G_FILE_TEST_EXISTS)) {
+			if (!ok || timed_out || exit_status != 0 || !g_file_test (i->render_path.c_str (), G_FILE_TEST_EXISTS)) {
 				result->failure_reason = _("SuperCollider render failed");
-				if (error && error->message) {
-					result->failure_reason = error->message;
-				} else if (standard_error && *standard_error) {
-					result->failure_reason = standard_error;
+				if (!ok && !spawn_error.empty ()) {
+					result->failure_reason = spawn_error;
+				} else if (timed_out) {
+					result->failure_reason = string_compose (_("SuperCollider render timed out after %1 seconds"), static_cast<int> (timeout_seconds));
+				} else {
+					std::ifstream log_input (i->log_path.c_str ());
+					if (log_input) {
+						std::string log_contents ((std::istreambuf_iterator<char> (log_input)), std::istreambuf_iterator<char> ());
+						if (!log_contents.empty ()) {
+							result->failure_reason = log_contents;
+						}
+					}
 				}
 			} else {
 				RenderClipOutput output;
@@ -731,12 +1023,6 @@ SuperColliderTrackEditor::render_to_timeline ()
 				output.render_path = i->render_path;
 				result->clips.push_back (output);
 			}
-
-			if (error) {
-				g_error_free (error);
-			}
-			g_free (standard_output);
-			g_free (standard_error);
 
 			if (!result->failure_reason.empty ()) {
 				break;
@@ -786,8 +1072,23 @@ SuperColliderTrackEditor::render_to_timeline ()
 
 			for (std::vector<RenderClipOutput>::const_iterator i = result->clips.begin (); i != result->clips.end (); ++i) {
 				SourceList sources;
-				sources.push_back (SourceFactory::createExternal (DataType::AUDIO, session, i->render_path, 0, Source::Flag (AudioFileSource::NoPeakFile), false));
-				sources.push_back (SourceFactory::createExternal (DataType::AUDIO, session, i->render_path, 1, Source::Flag (AudioFileSource::NoPeakFile), false));
+
+				try {
+					std::shared_ptr<Source> left = session.audio_source_by_path_and_channel (i->render_path, 0);
+					if (!left) {
+						left = SourceFactory::createExternal (DataType::AUDIO, session, i->render_path, 0, Source::Flag (0), true, true);
+					}
+					sources.push_back (left);
+
+					std::shared_ptr<Source> right = session.audio_source_by_path_and_channel (i->render_path, 1);
+					if (!right) {
+						right = SourceFactory::createExternal (DataType::AUDIO, session, i->render_path, 1, Source::Flag (0), true, true);
+					}
+					sources.push_back (right);
+				} catch (failed_constructor const&) {
+					result->failure_reason = _("rendered file could not be imported");
+					break;
+				}
 
 				if (!sources[0] || !sources[1]) {
 					result->failure_reason = _("rendered file could not be imported");
@@ -812,9 +1113,6 @@ SuperColliderTrackEditor::render_to_timeline ()
 				render_playlist->clear_owned_changes ();
 				render_playlist->add_region (rendered_region, i->position);
 				render_playlist->rdiff_and_add_command (&session);
-
-				SourceFactory::setup_peakfile (sources[0], true);
-				SourceFactory::setup_peakfile (sources[1], true);
 				++rendered;
 			}
 
@@ -870,12 +1168,15 @@ SuperColliderTrackEditor::render_to_midi_track ()
 		return;
 	}
 
-	std::vector<std::shared_ptr<Region> > clips;
-	source_playlist->foreach_region ([&clips] (std::shared_ptr<Region> region) {
-		if (region) {
-			clips.push_back (region);
-		}
-	});
+	std::vector<std::shared_ptr<Region> > clips = selected_regions_for_track (sct);
+	bool const using_selection = !clips.empty ();
+	if (!using_selection) {
+		source_playlist->foreach_region ([&clips] (std::shared_ptr<Region> region) {
+			if (region) {
+				clips.push_back (region);
+			}
+		});
+	}
 
 	if (clips.empty ()) {
 		_render_in_progress = false;
@@ -899,8 +1200,6 @@ SuperColliderTrackEditor::render_to_midi_track ()
 	std::string const sound_path = session.session_directory ().sound_path ();
 	std::string const track_id = sct->id ().to_s ();
 	std::string const track_name = sct->name ();
-	std::string const pattern_name = sct->supercollider_synthdef ();
-	std::string const source = sct->supercollider_source ();
 
 	std::vector<MidiRenderClipTask> render_tasks;
 	for (std::vector<std::shared_ptr<Region> >::const_iterator i = clips.begin (); i != clips.end (); ++i) {
@@ -913,6 +1212,8 @@ SuperColliderTrackEditor::render_to_midi_track ()
 		MidiRenderClipTask task;
 		task.clip_name = clip->name ();
 		task.clip_id = clip->id ().to_s ();
+		task.synthdef = sct->supercollider_synthdef_for_region (*clip);
+		task.source = normalize_language_script_source (sct->supercollider_source_for_region (*clip));
 		task.position = clip->position ();
 		task.position_samples = clip->position_sample ();
 		task.length_samples = clip->length_samples ();
@@ -928,12 +1229,16 @@ SuperColliderTrackEditor::render_to_midi_track ()
 	}
 
 	std::string const render_track_name = string_compose (_("%1 MIDI Render"), sct->name ());
-	_status_label.set_text (string_compose (_("Render status: rendering %1 clip(s) to MIDI..."), render_tasks.size ()));
+	if (using_selection) {
+		_status_label.set_text (string_compose (_("Render status: rendering %1 selected clip(s) to MIDI..."), render_tasks.size ()));
+	} else {
+		_status_label.set_text (string_compose (_("Render status: rendering %1 clip(s) to MIDI..."), render_tasks.size ()));
+	}
 	_apply_button.set_sensitive (false);
 	_restart_button.set_sensitive (false);
 	_render_button.set_sensitive (false);
 
-	std::thread ([this, render_tasks, runtime_path, track_id, track_name, pattern_name, source, render_track_name, tempo_map] () {
+	std::thread ([this, render_tasks, runtime_path, track_id, track_name, render_track_name, tempo_map] () {
 		std::shared_ptr<MidiRenderWorkResult> result (new MidiRenderWorkResult);
 
 		for (std::vector<MidiRenderClipTask>::const_iterator i = render_tasks.begin (); i != render_tasks.end (); ++i) {
@@ -944,10 +1249,8 @@ SuperColliderTrackEditor::render_to_midi_track ()
 			}
 
 			script
-				<< "(\n"
-				<< "var outputPath = " << sc_string_literal (i->notes_path) << ";\n"
-				<< "var notes;\n"
-				<< "var eventValue = { |event, symbolKey, stringKey, fallback|\n"
+				<< "~scardourOutputPath = " << sc_string_literal (i->notes_path) << ";\n"
+				<< "~scardourEventValue = { |event, symbolKey, stringKey, fallback|\n"
 				<< "    var value = event[symbolKey];\n"
 				<< "    if (value.isNil) { value = event.at(stringKey); };\n"
 				<< "    if (value.isNil) { value = fallback; };\n"
@@ -955,7 +1258,7 @@ SuperColliderTrackEditor::render_to_midi_track ()
 				<< "};\n"
 				<< "~scardourTrackId = " << sc_string_literal (track_id) << ";\n"
 				<< "~scardourTrackName = " << sc_string_literal (track_name) << ";\n"
-				<< "~scardourSynthDef = " << sc_string_literal (pattern_name) << ";\n"
+				<< "~scardourSynthDef = " << sc_string_literal (i->synthdef) << ";\n"
 				<< "~scardourRegionId = " << sc_string_literal (i->clip_id) << ";\n"
 				<< "~scardourRegionName = " << sc_string_literal (i->clip_name) << ";\n"
 				<< "~ardourTrackId = ~scardourTrackId;\n"
@@ -965,22 +1268,21 @@ SuperColliderTrackEditor::render_to_midi_track ()
 				<< "~ardourRegionName = ~scardourRegionName;\n"
 				<< "~scardourMidiNotes = List.new;\n"
 				<< "~ardourMidiNotes = ~scardourMidiNotes;\n"
-				<< source << "\n"
+				<< i->source << "\n"
 				<< "~ardourMidiNotes = ~ardourMidiNotes ? ~scardourMidiNotes;\n"
 				<< "~scardourMidiNotes = ~scardourMidiNotes ? ~ardourMidiNotes;\n"
-				<< "notes = ~scardourMidiNotes ? Array.new;\n"
-				<< "File.use(outputPath, \"w\", { |file|\n"
-				<< "    notes.do({ |event|\n"
-				<< "        var start = eventValue.(event, \\start, \"start\", eventValue.(event, \\time, \"time\", 0)).asFloat;\n"
-				<< "        var length = eventValue.(event, \\length, \"length\", eventValue.(event, \\dur, \"dur\", 0.25)).asFloat.max(0.001);\n"
-				<< "        var note = eventValue.(event, \\note, \"note\", eventValue.(event, \\pitch, \"pitch\", 60)).asInteger.clip(0, 127);\n"
-				<< "        var velocity = eventValue.(event, \\velocity, \"velocity\", eventValue.(event, \\vel, \"vel\", 100)).asInteger.clip(1, 127);\n"
-				<< "        var channel = eventValue.(event, \\channel, \"channel\", 0).asInteger.clip(0, 15);\n"
+				<< "~scardourMidiNotesToWrite = ~scardourMidiNotes ? Array.new;\n"
+				<< "File.use(~scardourOutputPath, \"w\", { |file|\n"
+				<< "    ~scardourMidiNotesToWrite.do({ |event|\n"
+				<< "        var start = ~scardourEventValue.(event, \\start, \"start\", ~scardourEventValue.(event, \\time, \"time\", 0)).asFloat;\n"
+				<< "        var length = ~scardourEventValue.(event, \\length, \"length\", ~scardourEventValue.(event, \\dur, \"dur\", 0.25)).asFloat.max(0.001);\n"
+				<< "        var note = ~scardourEventValue.(event, \\note, \"note\", ~scardourEventValue.(event, \\pitch, \"pitch\", 60)).asInteger.clip(0, 127);\n"
+				<< "        var velocity = ~scardourEventValue.(event, \\velocity, \"velocity\", ~scardourEventValue.(event, \\vel, \"vel\", 100)).asInteger.clip(1, 127);\n"
+				<< "        var channel = ~scardourEventValue.(event, \\channel, \"channel\", 0).asInteger.clip(0, 15);\n"
 				<< "        file.write(\"%\\t%\\t%\\t%\\t%\\n\".format(start, length, note, velocity, channel));\n"
 				<< "    });\n"
 				<< "});\n"
-				<< "0.exit;\n"
-				<< ")\n";
+				<< "0.exit;\n";
 
 			script.close ();
 

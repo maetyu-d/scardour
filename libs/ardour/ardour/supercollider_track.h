@@ -26,9 +26,11 @@ public:
 
 	void set_supercollider_source (std::string const&);
 	std::string const& supercollider_source () const { return _supercollider_source; }
+	std::string supercollider_source_for_region (Region const&) const;
 
 	void set_supercollider_synthdef (std::string const&);
 	std::string const& supercollider_synthdef () const { return _supercollider_synthdef; }
+	std::string supercollider_synthdef_for_region (Region const&) const;
 
 	void set_supercollider_auto_synthdef (bool yn);
 	bool supercollider_auto_synthdef () const { return _supercollider_auto_synthdef; }
@@ -50,6 +52,7 @@ public:
 
 	static bool xml_node_is_supercollider (XMLNode const&);
 	static std::string infer_supercollider_synthdef (std::string const&);
+	std::string supercollider_clip_name (Region const&) const;
 
 protected:
 	XMLNode& state (bool save_template) const;

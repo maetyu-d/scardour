@@ -648,6 +648,13 @@ MidiRegionView::pianoroll_window_deleted (GdkEventAny*)
 void
 MidiRegionView::show_region_editor ()
 {
+	if (RouteTimeAxisView* const rtv = dynamic_cast<RouteTimeAxisView*> (&trackview)) {
+		if (std::dynamic_pointer_cast<ARDOUR::SuperColliderTrack> (rtv->route ())) {
+			rtv->open_supercollider_editor ();
+			return;
+		}
+	}
+
 	if (!_editor) {
 		std::shared_ptr<MidiTrack> track = std::dynamic_pointer_cast<MidiTrack> (trackview.stripable());
 		assert (track);

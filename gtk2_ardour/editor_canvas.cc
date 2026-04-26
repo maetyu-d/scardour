@@ -637,7 +637,10 @@ Editor::drop_paths_part_two (const vector<string>& paths, timepos_t const & p, d
 								PBD::PropertyList plist;
 								plist.add (ARDOUR::Properties::start, Temporal::Beats ());
 								plist.add (ARDOUR::Properties::length, beat_length);
-								plist.add (ARDOUR::Properties::name, string_compose ("%1: %2", sct->supercollider_generates_midi () ? _("SC MIDI") : _("SC"), sct->supercollider_synthdef ()));
+								std::string const region_synthdef = SuperColliderTrack::infer_supercollider_synthdef (source_text);
+								plist.add (ARDOUR::Properties::supercollider_source, source_text);
+								plist.add (ARDOUR::Properties::supercollider_synthdef, region_synthdef);
+								plist.add (ARDOUR::Properties::name, string_compose ("%1: %2", sct->supercollider_generates_midi () ? _("SC MIDI") : _("SC"), region_synthdef.empty () ? sct->supercollider_synthdef () : region_synthdef));
 								plist.add (ARDOUR::Properties::layer, 0);
 								plist.add (ARDOUR::Properties::whole_file, true);
 								plist.add (ARDOUR::Properties::external, false);
@@ -650,6 +653,9 @@ Editor::drop_paths_part_two (const vector<string>& paths, timepos_t const & p, d
 									msg.run ();
 								} else {
 									PublicEditor::instance ().begin_reversible_command (_("Import SuperCollider File"));
+									region->set_supercollider_source (source_text);
+									region->set_supercollider_synthdef (region_synthdef);
+									region->set_name (sct->supercollider_clip_name (*region));
 									sct->clear_changes ();
 									sct->set_supercollider_source (source_text);
 									_session->add_command (new StatefulDiffCommand (sct));

@@ -141,6 +141,7 @@ SuperColliderTrack::set_supercollider_source (std::string const& source)
 {
 	_supercollider_source = source.empty () ? default_supercollider_source (_supercollider_output_mode) : source;
 	update_inferred_synthdef ();
+	refresh_timeline_regions ();
 	refresh_runtime ();
 }
 
@@ -277,6 +278,47 @@ SuperColliderTrack::infer_supercollider_synthdef (std::string const& source)
 }
 
 std::string
+SuperColliderTrack::supercollider_source_for_region (Region const& region) const
+{
+	std::string const source = region.supercollider_source ();
+	return source.empty () ? _supercollider_source : source;
+}
+
+std::string
+SuperColliderTrack::supercollider_synthdef_for_region (Region const& region) const
+{
+	std::string const source = region.supercollider_source ();
+	if (_supercollider_auto_synthdef && !source.empty ()) {
+		std::string const inferred = infer_supercollider_synthdef (source);
+		if (!inferred.empty ()) {
+			return inferred;
+		}
+	}
+
+	std::string const region_synthdef = region.supercollider_synthdef ();
+	if (!region_synthdef.empty ()) {
+		return region_synthdef;
+	}
+
+	if (_supercollider_auto_synthdef) {
+		std::string const inferred = infer_supercollider_synthdef (supercollider_source_for_region (region));
+		if (!inferred.empty ()) {
+			return inferred;
+		}
+	}
+
+	return _supercollider_synthdef.empty () ? default_supercollider_synthdef (_supercollider_output_mode) : _supercollider_synthdef;
+}
+
+std::string
+SuperColliderTrack::supercollider_clip_name (Region const& region) const
+{
+	std::string const clip_prefix = supercollider_generates_midi () ? _("SC MIDI") : _("SC");
+	std::string const synthdef = supercollider_synthdef_for_region (region);
+	return string_compose ("%1: %2", clip_prefix, synthdef.empty () ? default_supercollider_synthdef (_supercollider_output_mode) : synthdef);
+}
+
+std::string
 SuperColliderTrack::default_supercollider_source (OutputMode output_mode)
 {
 	if (output_mode == MidiOutput) {
@@ -397,13 +439,12 @@ SuperColliderTrack::refresh_timeline_regions ()
 		return;
 	}
 
-	std::string const clip_prefix = supercollider_generates_midi () ? _("SC MIDI") : _("SC");
-	std::string const clip_name = string_compose ("%1: %2", clip_prefix, _supercollider_synthdef.empty () ? default_supercollider_synthdef (_supercollider_output_mode) : _supercollider_synthdef);
-	pl->foreach_region ([clip_name] (std::shared_ptr<Region> region) {
+	pl->foreach_region ([this] (std::shared_ptr<Region> region) {
 		if (!region) {
 			return;
 		}
 
+		std::string const clip_name = supercollider_clip_name (*region);
 		if (region->name () != clip_name) {
 			region->set_name (clip_name);
 		}

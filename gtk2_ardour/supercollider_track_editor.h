@@ -48,8 +48,10 @@ public:
 private:
 	void route_property_changed (const PBD::PropertyChange&);
 	void route_going_away ();
+	void region_selection_changed ();
 	void update_title ();
 	void sync_editor ();
+	std::shared_ptr<ARDOUR::Region> selected_region () const;
 	void mark_dirty ();
 	void source_or_autofill_changed ();
 	void apply_changes ();

@@ -292,19 +292,78 @@ split_synthdef_prelude (std::string const& source, std::string& prelude, std::st
 		return false;
 	}
 
-	std::string::size_type const add_pos = source.find (".add;", synthdef_pos);
-	if (add_pos == std::string::npos) {
+	std::string::size_type const playback_pos = source.find (".play", synthdef_pos);
+	std::string::size_type search_pos = synthdef_pos;
+	std::string::size_type last_add_pos = std::string::npos;
+
+	while (true) {
+		std::string::size_type const add_pos = source.find (".add;", search_pos);
+		if (add_pos == std::string::npos) {
+			break;
+		}
+		if (playback_pos != std::string::npos && add_pos > playback_pos) {
+			break;
+		}
+		last_add_pos = add_pos;
+		search_pos = add_pos + 5;
+	}
+
+	if (last_add_pos == std::string::npos) {
 		return false;
 	}
 
-	std::string::size_type split_pos = add_pos + 5;
-	while (split_pos < source.size () && (source[split_pos] == '\n' || source[split_pos] == '\r')) {
-		++split_pos;
+	std::string::size_type split_pos = last_add_pos + 5;
+	while (split_pos < source.size ()) {
+		char const c = source[split_pos];
+		if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+			++split_pos;
+			continue;
+		}
+		if (c == ')' || c == ';') {
+			++split_pos;
+			continue;
+		}
+		break;
 	}
 
 	prelude = source.substr (0, split_pos);
 	body = source.substr (split_pos);
 	return true;
+}
+
+static std::string
+normalize_language_script_source (std::string const& source)
+{
+	std::istringstream input (source);
+	std::string line;
+	std::string normalized;
+	bool first = true;
+
+	while (std::getline (input, line)) {
+		std::string trimmed = line;
+		std::string::size_type begin = trimmed.find_first_not_of (" \t\r");
+		if (begin == std::string::npos) {
+			begin = 0;
+		}
+		std::string::size_type end = trimmed.find_last_not_of (" \t\r");
+		if (end == std::string::npos) {
+			trimmed.clear ();
+		} else {
+			trimmed = trimmed.substr (begin, end - begin + 1);
+		}
+
+		if (trimmed == "(" || trimmed == ")") {
+			continue;
+		}
+
+		if (!first) {
+			normalized += "\n";
+		}
+		normalized += line;
+		first = false;
+	}
+
+	return normalized.empty () ? source : normalized;
 }
 
 std::string
@@ -420,7 +479,8 @@ SuperColliderSessionRuntime::bootstrap_code () const
 std::string
 SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& track, Region const& region) const
 {
-	std::string const source = track.supercollider_source ();
+	std::string const source = normalize_language_script_source (track.supercollider_source_for_region (region));
+	std::string const synthdef = track.supercollider_synthdef_for_region (region);
 
 	if (track.supercollider_generates_midi ()) {
 		Temporal::TempoMap::SharedPtr tmap (Temporal::TempoMap::use ());
@@ -534,7 +594,7 @@ SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& t
 			")\n",
 			string_literal (track_key (track)),
 			string_literal (track.name ()),
-			string_literal (track.supercollider_synthdef ()),
+			string_literal (synthdef),
 			string_literal (region.id ().to_s ()),
 			string_literal (region.name ()),
 			std::to_string (region.position_sample ()),
@@ -618,7 +678,7 @@ SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& t
 		")\n",
 		string_literal (track_key (track)),
 		string_literal (track.name ()),
-		string_literal (track.supercollider_synthdef ()),
+		string_literal (synthdef),
 		string_literal (region.id ().to_s ()),
 		string_literal (region.name ()),
 		std::to_string (region.position_sample ()),
@@ -676,7 +736,7 @@ SuperColliderSessionRuntime::track_play_region_code (SuperColliderTrack const& t
 		")\n",
 		string_literal (track_key (track)),
 		string_literal (track.name ()),
-		string_literal (track.supercollider_synthdef ()),
+		string_literal (synthdef),
 		string_literal (region.id ().to_s ()),
 		string_literal (region.name ()),
 		std::to_string (region.position_sample ()),

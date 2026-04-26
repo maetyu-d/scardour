@@ -78,6 +78,8 @@ namespace Properties {
 	LIBARDOUR_API extern PBD::PropertyDescriptor<float>             shift;
 	LIBARDOUR_API extern PBD::PropertyDescriptor<uint64_t>          layering_index;
 	LIBARDOUR_API extern PBD::PropertyDescriptor<std::string>       tags;
+	LIBARDOUR_API extern PBD::PropertyDescriptor<std::string>       supercollider_source;
+	LIBARDOUR_API extern PBD::PropertyDescriptor<std::string>       supercollider_synthdef;
 	LIBARDOUR_API extern PBD::PropertyDescriptor<uint64_t>          reg_group;
 	LIBARDOUR_API extern PBD::PropertyDescriptor<bool>              contents; // type doesn't matter here, used for signal only
 	LIBARDOUR_API extern PBD::PropertyDescriptor<bool>              region_fx; // type doesn't matter here, used for signal only
@@ -436,6 +438,24 @@ public:
 		return true;
 	}
 
+	std::string supercollider_source () const { return _supercollider_source; }
+	virtual bool set_supercollider_source (const std::string& str) {
+		if (_supercollider_source != str) {
+			_supercollider_source = str;
+			PropertyChanged (PBD::PropertyChange (Properties::supercollider_source));
+		}
+		return true;
+	}
+
+	std::string supercollider_synthdef () const { return _supercollider_synthdef; }
+	virtual bool set_supercollider_synthdef (const std::string& str) {
+		if (_supercollider_synthdef != str) {
+			_supercollider_synthdef = str;
+			PropertyChanged (PBD::PropertyChange (Properties::supercollider_synthdef));
+		}
+		return true;
+	}
+
 	/* serialization */
 
 	XMLNode&         get_state () const;
@@ -666,6 +686,8 @@ private:
 	PBD::Property<float>       _shift;
 	PBD::Property<uint64_t>    _layering_index;
 	PBD::Property<std::string> _tags;
+	PBD::Property<std::string> _supercollider_source;
+	PBD::Property<std::string> _supercollider_synthdef;
 	PBD::Property<uint64_t>    _reg_group;
 	PBD::Property<bool>        _contents; // type is irrelevant
 
@@ -696,4 +718,3 @@ private:
 };
 
 } /* namespace ARDOUR */
-

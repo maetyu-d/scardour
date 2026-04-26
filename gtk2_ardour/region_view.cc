@@ -49,6 +49,7 @@
 #include "automation_region_view.h"
 #include "public_editor.h"
 #include "region_editor_window.h"
+#include "route_time_axis.h"
 #include "ghostregion.h"
 #include "ui_config.h"
 #include "utils.h"
@@ -755,6 +756,13 @@ RegionView::set_sync_mark_color ()
 void
 RegionView::show_region_editor ()
 {
+	if (RouteTimeAxisView* const rtv = dynamic_cast<RouteTimeAxisView*> (&trackview)) {
+		if (std::dynamic_pointer_cast<ARDOUR::SuperColliderTrack> (rtv->route ())) {
+			rtv->open_supercollider_editor ();
+			return;
+		}
+	}
+
 	if (!_editor) {
 		_editor = new RegionEditorWindow (trackview.session(), this);
 	}
@@ -1229,4 +1237,3 @@ RegionView::display_enabled() const
 {
 	return !_disable_display;
 }
-
