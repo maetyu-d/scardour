@@ -14,6 +14,7 @@
 #include <ytkmm/box.h>
 #include <ytkmm/button.h>
 #include <ytkmm/checkbutton.h>
+#include <ytkmm/comboboxtext.h>
 #include <ytkmm/entry.h>
 #include <ytkmm/filechooserdialog.h>
 #include <ytkmm/label.h>
@@ -45,6 +46,7 @@ private:
 	void reapply_fx ();
 	void restart_fx ();
 	void clear_stuck_fx ();
+	void insert_template ();
 	void load_source_from_file ();
 	void save_source_to_file ();
 
@@ -55,6 +57,9 @@ private:
 	Gtk::HBox _controls_box;
 	Gtk::HBox _recovery_box;
 	Gtk::HBox _file_box;
+	Gtk::HBox _template_box;
+	Gtk::Label _template_label;
+	Gtk::ComboBoxText _template_combo;
 	Gtk::Label _synthdef_label;
 	Gtk::Entry _synthdef_entry;
 	Gtk::CheckButton _enable_button;
@@ -63,6 +68,7 @@ private:
 	Gtk::Button _reapply_button;
 	Gtk::Button _restart_button;
 	Gtk::Button _clear_button;
+	Gtk::Button _template_button;
 	Gtk::Button _load_button;
 	Gtk::Button _save_button;
 	Gtk::ScrolledWindow _source_scroller;

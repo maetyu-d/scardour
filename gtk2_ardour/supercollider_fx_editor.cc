@@ -29,6 +29,72 @@ using namespace ARDOUR;
 
 namespace {
 
+struct FxTemplate {
+	char const* name;
+	char const* source;
+};
+
+FxTemplate const fx_templates[] = {
+	{
+		"Filter",
+		"SynthDef(\\SCArdourRouteFX, { |in=0, out=0|\n"
+		"    var sig = In.ar(in, 2);\n"
+		"    var wet = RLPF.ar(sig, 900, 0.25);\n"
+		"    ReplaceOut.ar(out, wet * 0.95);\n"
+		"}).add;\n"
+	},
+	{
+		"Drive",
+		"SynthDef(\\SCArdourRouteFX, { |in=0, out=0|\n"
+		"    var sig = In.ar(in, 2);\n"
+		"    var wet = HPF.ar((sig * 6).tanh, 90) * 0.8;\n"
+		"    ReplaceOut.ar(out, wet);\n"
+		"}).add;\n"
+	},
+	{
+		"Delay",
+		"SynthDef(\\SCArdourRouteFX, { |in=0, out=0|\n"
+		"    var sig = In.ar(in, 2);\n"
+		"    var echo = CombC.ar(sig, 0.75, [0.33, 0.41], 3.2);\n"
+		"    ReplaceOut.ar(out, (sig * 0.65) + (echo * 0.45));\n"
+		"}).add;\n"
+	},
+	{
+		"Reverb",
+		"SynthDef(\\SCArdourRouteFX, { |in=0, out=0|\n"
+		"    var sig = In.ar(in, 2);\n"
+		"    var wet = FreeVerb2.ar(sig[0], sig[1], 0.38, 0.86, 0.32);\n"
+		"    ReplaceOut.ar(out, (sig * 0.65) + (wet * 0.55));\n"
+		"}).add;\n"
+	},
+	{
+		"Tremolo",
+		"SynthDef(\\SCArdourRouteFX, { |in=0, out=0|\n"
+		"    var sig = In.ar(in, 2);\n"
+		"    var amp = SinOsc.kr(5).range(0.15, 1.0);\n"
+		"    ReplaceOut.ar(out, sig * amp);\n"
+		"}).add;\n"
+	},
+	{
+		"Glitch",
+		"SynthDef(\\SCArdourRouteFX, { |in=0, out=0|\n"
+		"    var sig = In.ar(in, 2);\n"
+		"    var gate = LFPulse.kr(9, 0, 0.22);\n"
+		"    var wet = Decimator.ar(sig * gate * 5, 3200, 5);\n"
+		"    ReplaceOut.ar(out, wet * 0.85);\n"
+		"}).add;\n"
+	},
+	{
+		"Mono To Stereo Widener",
+		"SynthDef(\\SCArdourRouteFX, { |in=0, out=0|\n"
+		"    var mono = Mix(In.ar(in, 2)) * 0.5;\n"
+		"    var left = DelayC.ar(mono, 0.03, 0.0);\n"
+		"    var right = DelayC.ar(mono, 0.03, 0.018);\n"
+		"    ReplaceOut.ar(out, [left, right] * 0.95);\n"
+		"}).add;\n"
+	}
+};
+
 std::string
 sc_string_literal (std::string const& value)
 {
@@ -179,6 +245,7 @@ compile_effect_synthdef (std::string const& runtime_path, std::string const& sou
 
 SuperColliderFxEditor::SuperColliderFxEditor (std::shared_ptr<Route> route)
 	: ArdourWindow ("")
+	, _template_label (_("Template"))
 	, _synthdef_label (_("SynthDef"))
 	, _enable_button (_("Enable FX"))
 	, _auto_synthdef_button (_("Auto-fill from source"))
@@ -186,6 +253,7 @@ SuperColliderFxEditor::SuperColliderFxEditor (std::shared_ptr<Route> route)
 	, _reapply_button (_("Reapply FX"))
 	, _restart_button (_("Restart FX Runtime"))
 	, _clear_button (_("Clear Stuck FX"))
+	, _template_button (_("Insert Template"))
 	, _load_button (_("Load .sc"))
 	, _save_button (_("Save .sc"))
 	, _updating (false)
@@ -203,11 +271,13 @@ SuperColliderFxEditor::SuperColliderFxEditor (std::shared_ptr<Route> route)
 	_controls_box.set_spacing (6);
 	_recovery_box.set_spacing (6);
 	_file_box.set_spacing (6);
+	_template_box.set_spacing (6);
 	_status_label.set_alignment (0.0, 0.5);
 	_detail_label.set_alignment (0.0, 0.5);
 	_detail_label.set_line_wrap (true);
 	_diagnostics_label.set_alignment (0.0, 0.5);
 	_diagnostics_label.set_line_wrap (true);
+	_template_label.set_alignment (0.0, 0.5);
 	_synthdef_label.set_alignment (0.0, 0.5);
 
 	_source_buffer = Gtk::TextBuffer::create ();
@@ -233,6 +303,10 @@ SuperColliderFxEditor::SuperColliderFxEditor (std::shared_ptr<Route> route)
 	_recovery_box.pack_start (_restart_button, false, false);
 	_recovery_box.pack_start (_clear_button, false, false);
 
+	_template_box.pack_start (_template_label, false, false);
+	_template_box.pack_start (_template_combo, true, true);
+	_template_box.pack_start (_template_button, false, false);
+
 	_file_box.pack_start (_load_button, false, false);
 	_file_box.pack_start (_save_button, false, false);
 
@@ -241,8 +315,15 @@ SuperColliderFxEditor::SuperColliderFxEditor (std::shared_ptr<Route> route)
 	_vbox.pack_start (_diagnostics_label, false, false);
 	_vbox.pack_start (_controls_box, false, false);
 	_vbox.pack_start (_recovery_box, false, false);
+	_vbox.pack_start (_template_box, false, false);
 	_vbox.pack_start (_file_box, false, false);
 	_vbox.pack_start (_source_scroller, true, true);
+
+	_template_combo.append (_("Choose a starting point..."));
+	for (size_t i = 0; i < sizeof (fx_templates) / sizeof (fx_templates[0]); ++i) {
+		_template_combo.append (fx_templates[i].name);
+	}
+	_template_combo.set_active (0);
 
 	_route = route;
 	_route->set_supercollider_fx_editor (this);
@@ -258,6 +339,7 @@ SuperColliderFxEditor::SuperColliderFxEditor (std::shared_ptr<Route> route)
 	_reapply_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderFxEditor::reapply_fx));
 	_restart_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderFxEditor::restart_fx));
 	_clear_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderFxEditor::clear_stuck_fx));
+	_template_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderFxEditor::insert_template));
 	_load_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderFxEditor::load_source_from_file));
 	_save_button.signal_clicked ().connect (sigc::mem_fun (*this, &SuperColliderFxEditor::save_source_to_file));
 
@@ -510,6 +592,24 @@ SuperColliderFxEditor::clear_stuck_fx ()
 
 	_route->clear_supercollider_fx ();
 	sync_editor ();
+}
+
+void
+SuperColliderFxEditor::insert_template ()
+{
+	int const row = _template_combo.get_active_row_number ();
+	if (row <= 0) {
+		return;
+	}
+
+	size_t const index = static_cast<size_t> (row - 1);
+	if (index >= sizeof (fx_templates) / sizeof (fx_templates[0])) {
+		return;
+	}
+
+	_source_buffer->set_text (fx_templates[index].source);
+	source_or_autofill_changed ();
+	_route->set_supercollider_fx_status (_("template inserted"), string_compose (_("Loaded the %1 template into the editor."), fx_templates[index].name));
 }
 
 void
