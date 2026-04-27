@@ -200,6 +200,10 @@ SuperColliderFxEditor::SuperColliderFxEditor (std::shared_ptr<Route> route)
 	_controls_box.set_spacing (6);
 	_file_box.set_spacing (6);
 	_status_label.set_alignment (0.0, 0.5);
+	_detail_label.set_alignment (0.0, 0.5);
+	_detail_label.set_line_wrap (true);
+	_diagnostics_label.set_alignment (0.0, 0.5);
+	_diagnostics_label.set_line_wrap (true);
 	_synthdef_label.set_alignment (0.0, 0.5);
 
 	_source_buffer = Gtk::TextBuffer::create ();
@@ -225,6 +229,8 @@ SuperColliderFxEditor::SuperColliderFxEditor (std::shared_ptr<Route> route)
 	_file_box.pack_start (_save_button, false, false);
 
 	_vbox.pack_start (_status_label, false, false);
+	_vbox.pack_start (_detail_label, false, false);
+	_vbox.pack_start (_diagnostics_label, false, false);
 	_vbox.pack_start (_controls_box, false, false);
 	_vbox.pack_start (_file_box, false, false);
 	_vbox.pack_start (_source_scroller, true, true);
@@ -308,12 +314,16 @@ SuperColliderFxEditor::sync_editor ()
 	_synthdef_entry.set_text (_route->supercollider_fx_synthdef ());
 	_synthdef_entry.set_sensitive (!_route->supercollider_fx_auto_synthdef ());
 
-	if (!_route->supercollider_fx_last_error ().empty ()) {
-		_status_label.set_text (string_compose (_("FX status: %1"), _route->supercollider_fx_last_error ()));
-	} else if (_route->supercollider_fx_enabled ()) {
-		_status_label.set_text (_("FX status: enabled"));
+	std::string const summary = _route->supercollider_fx_status_summary ().empty ()
+		? (_route->supercollider_fx_enabled () ? _("enabled") : _("disabled"))
+		: _route->supercollider_fx_status_summary ();
+	_status_label.set_text (string_compose (_("FX status: %1"), summary));
+	_detail_label.set_text (_route->supercollider_fx_status_detail ());
+
+	if (!_route->supercollider_fx_diagnostics_path ().empty ()) {
+		_diagnostics_label.set_text (string_compose (_("Diagnostics log: %1"), _route->supercollider_fx_diagnostics_path ()));
 	} else {
-		_status_label.set_text (_("FX status: disabled"));
+		_diagnostics_label.set_text ("");
 	}
 
 	_dirty = false;
@@ -340,6 +350,8 @@ SuperColliderFxEditor::mark_dirty ()
 
 	_dirty = true;
 	_status_label.set_text (_("FX status: unsaved changes"));
+	_detail_label.set_text (_("Apply to compile the SynthDef again and reload the route effect."));
+	_diagnostics_label.set_text ("");
 }
 
 void
@@ -381,7 +393,8 @@ SuperColliderFxEditor::apply_changes ()
 	}
 
 	if (_enable_button.get_active () && synthdef.empty ()) {
-		_status_label.set_text (_("FX status: no SynthDef name could be inferred"));
+		_route->set_supercollider_fx_status (_("missing SynthDef name"), _("No SynthDef name could be inferred from the current source."), "", true);
+		sync_editor ();
 		return;
 	}
 
@@ -393,28 +406,29 @@ SuperColliderFxEditor::apply_changes ()
 	if (_enable_button.get_active ()) {
 		std::string const runtime_path = find_sclang_path ();
 		if (runtime_path.empty ()) {
-			_status_label.set_text (_("FX status: sclang not found"));
+			_route->set_supercollider_fx_status (_("sclang not found"), _("SCArdour could not find the SuperCollider language binary needed to compile this effect."), "", true);
+			sync_editor ();
 			return;
 		}
 
 		std::string compile_error;
 		if (!compile_effect_synthdef (runtime_path, _source_buffer->get_text (), synthdef, compile_error)) {
-			_status_label.set_text (string_compose (_("FX status: %1"), compile_error));
+			std::string const diagnostics_path = Glib::build_filename (fx_cache_directory (), "compile-" + synthdef + ".log");
+			_route->set_supercollider_fx_status (_("compile failed"), compile_error, diagnostics_path, true);
+			sync_editor ();
 			return;
 		}
 
 		if (!_route->refresh_supercollider_fx ()) {
-			_status_label.set_text (string_compose (_("FX status: %1"), _route->supercollider_fx_last_error ()));
+			sync_editor ();
 			return;
 		}
-
-		_status_label.set_text (_("FX status: applied"));
 	} else {
 		_route->refresh_supercollider_fx ();
-		_status_label.set_text (_("FX status: disabled"));
 	}
 
 	_dirty = false;
+	sync_editor ();
 }
 
 void
@@ -431,7 +445,8 @@ SuperColliderFxEditor::load_source_from_file ()
 
 	std::ifstream in (chooser.get_filename ().c_str (), std::ios::in);
 	if (!in) {
-		_status_label.set_text (_("FX status: could not open the selected file"));
+		_route->set_supercollider_fx_status (_("load failed"), _("Could not open the selected SuperCollider FX file."), "", true);
+		sync_editor ();
 		return;
 	}
 
@@ -454,11 +469,13 @@ SuperColliderFxEditor::save_source_to_file ()
 
 	std::ofstream out (chooser.get_filename ().c_str (), std::ios::out | std::ios::trunc);
 	if (!out) {
-		_status_label.set_text (_("FX status: could not save to the selected file"));
+		_route->set_supercollider_fx_status (_("save failed"), _("Could not save the SuperCollider FX source to the selected file."), "", true);
+		sync_editor ();
 		return;
 	}
 
 	out << _source_buffer->get_text ();
 	out.close ();
-	_status_label.set_text (_("FX status: source saved"));
+	_route->set_supercollider_fx_status (_("source saved"), chooser.get_filename ());
+	sync_editor ();
 }

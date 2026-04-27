@@ -47,6 +47,8 @@ private:
 
 	Gtk::VBox _vbox;
 	Gtk::Label _status_label;
+	Gtk::Label _detail_label;
+	Gtk::Label _diagnostics_label;
 	Gtk::HBox _controls_box;
 	Gtk::HBox _file_box;
 	Gtk::Label _synthdef_label;

@@ -159,6 +159,7 @@ RoutePropertiesBox::RoutePropertiesBox ()
 	_insert_frame.set_no_show_all ();
 	_supercollider_status.set_alignment (0.0, 0.5);
 	_supercollider_fx_status.set_alignment (0.0, 0.5);
+	_supercollider_fx_status.set_line_wrap (true);
 	_supercollider_synthdef_label.set_alignment (0.0, 0.5);
 	_supercollider_source_buffer = Gtk::TextBuffer::create ();
 	_supercollider_source_view.set_buffer (_supercollider_source_buffer);
@@ -594,15 +595,12 @@ RoutePropertiesBox::sync_supercollider_fx_access ()
 		return;
 	}
 
-	std::string status_text;
-	if (_route->supercollider_fx_enabled ()) {
-		if (_route->supercollider_fx_last_error ().empty ()) {
-			status_text = _("FX status: enabled");
-		} else {
-			status_text = string_compose (_("FX status: %1"), _route->supercollider_fx_last_error ());
-		}
-	} else {
-		status_text = _("FX status: disabled");
+	std::string const summary = _route->supercollider_fx_status_summary ().empty ()
+		? (_route->supercollider_fx_enabled () ? _("enabled") : _("disabled"))
+		: _route->supercollider_fx_status_summary ();
+	std::string status_text = string_compose (_("FX status: %1"), summary);
+	if (!_route->supercollider_fx_status_detail ().empty ()) {
+		status_text += "\n" + _route->supercollider_fx_status_detail ();
 	}
 
 	_supercollider_fx_status.set_text (status_text);

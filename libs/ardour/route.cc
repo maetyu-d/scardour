@@ -184,6 +184,12 @@ supercollider_fx_synthdef_path (std::string const& synthdef_name)
 }
 
 std::string
+supercollider_fx_compile_log_path (std::string const& synthdef_name)
+{
+	return Glib::build_filename (supercollider_fx_cache_directory (), "compile-" + synthdef_name + ".log");
+}
+
+std::string
 supercollider_fx_sclang_path ()
 {
 	gchar* path = g_find_program_in_path ("sclang");
@@ -253,6 +259,7 @@ compile_supercollider_fx_synthdef (std::string const& source, std::string const&
 
 	std::string const cache_dir = supercollider_fx_cache_directory ();
 	std::string const script_path = Glib::build_filename (cache_dir, "compile-" + synthdef_name + ".scd");
+	std::string const log_path = supercollider_fx_compile_log_path (synthdef_name);
 
 	std::ofstream script (script_path.c_str (), std::ios::out | std::ios::trunc);
 	if (!script) {
@@ -304,6 +311,14 @@ compile_supercollider_fx_synthdef (std::string const& source, std::string const&
 	g_free (standard_output);
 	g_free (standard_error);
 
+	{
+		std::ofstream log (log_path.c_str (), std::ios::out | std::ios::trunc);
+		if (log) {
+			log << "stdout:\n" << stdout_text << "\n";
+			log << "stderr:\n" << stderr_text << "\n";
+		}
+	}
+
 	if (!spawned) {
 		error_out = error ? error->message : _("Could not launch sclang");
 		if (error) {
@@ -348,6 +363,7 @@ Route::Route (Session& sess, string name, PresentationInfo::Flag flag, DataType 
 	, _supercollider_fx_editor_window (0)
 	, _supercollider_fx_source (default_supercollider_fx_source (2))
 	, _supercollider_fx_synthdef (default_supercollider_fx_synthdef ())
+	, _supercollider_fx_status_summary (_("disabled"))
 	, _supercollider_fx_auto_synthdef (true)
 	, _supercollider_fx_enabled (false)
 	, _supercollider_fx_restore_pending (false)
@@ -3209,13 +3225,24 @@ Route::supports_supercollider_fx () const
 }
 
 void
+Route::set_supercollider_fx_status (std::string const& summary, std::string const& detail, std::string const& diagnostics_path, bool error)
+{
+	_supercollider_fx_status_summary = summary;
+	_supercollider_fx_status_detail = detail;
+	_supercollider_fx_diagnostics_path = diagnostics_path;
+	_supercollider_fx_last_error = error ? detail : "";
+	supercollider_fx_changed ();
+}
+
+void
 Route::set_supercollider_fx_enabled (bool yn)
 {
 	_supercollider_fx_enabled = supports_supercollider_fx () && yn;
 	if (!_supercollider_fx_enabled) {
-		_supercollider_fx_last_error.clear ();
+		set_supercollider_fx_status (_("disabled"));
+		return;
 	}
-	supercollider_fx_changed ();
+	set_supercollider_fx_status (_("enabled, not yet applied"));
 }
 
 void
@@ -3255,7 +3282,7 @@ bool
 Route::refresh_supercollider_fx ()
 {
 	if (!supports_supercollider_fx ()) {
-		_supercollider_fx_last_error.clear ();
+		set_supercollider_fx_status (_("unsupported"), _("This route does not expose audio outputs for SuperCollider FX."), "", true);
 		return false;
 	}
 
@@ -3270,56 +3297,58 @@ Route::refresh_supercollider_fx ()
 				}
 			}
 		}
-		_supercollider_fx_last_error.clear ();
+		set_supercollider_fx_status (_("disabled"));
 		return false;
 	}
 
 	std::shared_ptr<Route> const self = std::dynamic_pointer_cast<Route> (shared_from_this ());
 	if (!self) {
-		_supercollider_fx_last_error = _("No route available");
+		set_supercollider_fx_status (_("route unavailable"), _("No route was available while applying the SuperCollider effect."), "", true);
 		return false;
 	}
 
 	g_setenv ("SCARDOUR_SUPERCOLLIDER_SYNTHDEF_PATH", supercollider_fx_cache_directory ().c_str (), 1);
+	set_supercollider_fx_status (_("preparing"), string_compose (_("Preparing SynthDef %1 for %2."), _supercollider_fx_synthdef, name ()));
 
 	std::string attach_error;
 	if (!_session.ensure_supercollider_effect (self, false, &attach_error)) {
-		_supercollider_fx_last_error = attach_error.empty () ? _("SuperColliderAU could not be attached as an effect") : attach_error;
+		set_supercollider_fx_status (_("attach failed"), attach_error.empty () ? _("SuperColliderAU could not be attached as an effect") : attach_error, "", true);
 		return false;
 	}
 
 	std::shared_ptr<PluginInsert> sc_insert = _session.find_supercollider_insert (self);
 	if (!sc_insert || !sc_insert->plugin ()) {
-		_supercollider_fx_last_error = _("SuperCollider effect insert was not found after attachment");
+		set_supercollider_fx_status (_("insert missing"), _("SuperCollider effect insert was not found after attachment."), "", true);
 		return false;
 	}
 
 	std::shared_ptr<AUPlugin> au = std::dynamic_pointer_cast<AUPlugin> (sc_insert->plugin ());
 	if (!au) {
-		_supercollider_fx_last_error = _("SuperCollider effect insert is not an AudioUnit");
+		set_supercollider_fx_status (_("wrong plugin type"), _("SuperCollider effect insert is not an AudioUnit."), "", true);
 		return false;
 	}
 
 	std::string const synthdef_path = supercollider_fx_synthdef_path (_supercollider_fx_synthdef);
+	std::string const diagnostics_path = supercollider_fx_compile_log_path (_supercollider_fx_synthdef);
 	if (!g_file_test (synthdef_path.c_str (), G_FILE_TEST_EXISTS)) {
 		std::string compile_error;
 		if (!compile_supercollider_fx_synthdef (_supercollider_fx_source, _supercollider_fx_synthdef, compile_error)) {
-			_supercollider_fx_last_error = compile_error.empty () ? _("Could not rebuild the SuperCollider effect synthdef") : compile_error;
+			set_supercollider_fx_status (_("compile failed"), compile_error.empty () ? _("Could not rebuild the SuperCollider effect synthdef") : compile_error, diagnostics_path, true);
 			return false;
 		}
 	}
 
 	if (!au->set_supercollider_synthdef_path (synthdef_path)) {
-		_supercollider_fx_last_error = _("Could not load the compiled SuperCollider effect synthdef file");
+		set_supercollider_fx_status (_("synthdef load failed"), _("Could not load the compiled SuperCollider effect synthdef file into SuperColliderAU."), diagnostics_path, true);
 		return false;
 	}
 
 	if (!au->set_supercollider_synthdef (_supercollider_fx_synthdef)) {
-		_supercollider_fx_last_error = _("Could not switch SuperCollider effect synthdef");
+		set_supercollider_fx_status (_("activation failed"), _("Could not switch SuperColliderAU to the requested effect SynthDef."), diagnostics_path, true);
 		return false;
 	}
 
-	_supercollider_fx_last_error.clear ();
+	set_supercollider_fx_status (_("applied"), string_compose (_("Loaded SynthDef %1 from %2."), _supercollider_fx_synthdef, synthdef_path), diagnostics_path);
 	return true;
 }
 

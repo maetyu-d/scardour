@@ -164,6 +164,10 @@ public:
 	bool supercollider_fx_auto_synthdef () const { return _supercollider_fx_auto_synthdef; }
 	bool refresh_supercollider_fx ();
 	std::string const& supercollider_fx_last_error () const { return _supercollider_fx_last_error; }
+	std::string const& supercollider_fx_status_summary () const { return _supercollider_fx_status_summary; }
+	std::string const& supercollider_fx_status_detail () const { return _supercollider_fx_status_detail; }
+	std::string const& supercollider_fx_diagnostics_path () const { return _supercollider_fx_diagnostics_path; }
+	void set_supercollider_fx_status (std::string const&, std::string const& detail = std::string (), std::string const& diagnostics_path = std::string (), bool error = false);
 
 	static std::string infer_supercollider_synthdef (std::string const&);
 	static std::string default_supercollider_fx_source (uint32_t audio_channels);
@@ -703,6 +707,9 @@ protected:
 	std::string _supercollider_fx_source;
 	std::string _supercollider_fx_synthdef;
 	std::string _supercollider_fx_last_error;
+	std::string _supercollider_fx_status_summary;
+	std::string _supercollider_fx_status_detail;
+	std::string _supercollider_fx_diagnostics_path;
 	bool _supercollider_fx_auto_synthdef;
 	bool _supercollider_fx_enabled;
 	bool _supercollider_fx_restore_pending;
