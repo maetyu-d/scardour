@@ -143,14 +143,14 @@ RegionEditor::RegionEditor (Session* s, std::shared_ptr<Region> r)
 		_sources_label.set_text (_("Source:"));
 	}
 
-	_table_clocks.set_col_spacings (12);
-	_table_clocks.set_row_spacings (6);
+	_table_clocks.set_col_spacings (14);
+	_table_clocks.set_row_spacings (10);
 	_table_clocks.set_border_width (0);
 	_table_clocks.set_homogeneous ();
 
-	_table_main.set_col_spacings (12);
-	_table_main.set_row_spacings (6);
-	_table_main.set_border_width (12);
+	_table_main.set_col_spacings (16);
+	_table_main.set_row_spacings (10);
+	_table_main.set_border_width (14);
 
 	_name_label.set_alignment (1, 0.5);
 	_sources_label.set_alignment (1, 0.5);
@@ -241,9 +241,12 @@ RegionEditor::RegionEditor (Session* s, std::shared_ptr<Region> r)
 	}
 
 	_sources.set_headers_visible (false);
+	_sources.set_size_request (-1, 64);
 	Gtk::CellRendererText* t = dynamic_cast<Gtk::CellRendererText*> (_sources.get_column_cell_renderer (0));
 	assert (t);
 	t->property_ellipsize () = Pango::ELLIPSIZE_END;
+
+	_region_fx_box.set_size_request (240, -1);
 
 	_region_fx_label.set_no_show_all ();
 	_region_fx_box.set_no_show_all ();

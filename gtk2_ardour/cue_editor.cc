@@ -543,6 +543,7 @@ CueEditor::build_upper_toolbar ()
 	toolbar_right->pack_start (zoom_focus_selector, false, false);
 
 	toolbar_outer->pack_end (*toolbar_right, false, false);
+	_upper_toolbar = toolbar_outer;
 	_toolbox.pack_start (*toolbar_outer, false, false); // VBox
 
 	_hpacker.pack_start (_toolbox, true, true);
@@ -550,6 +551,20 @@ CueEditor::build_upper_toolbar ()
 	_contents.add (_hpacker);
 	_contents.signal_unmap().connect ([this]()  { get_canvas_viewport()->unmap (); }, false);
 	_contents.signal_map().connect ([this]() { get_canvas_viewport()->map (); }, false);
+}
+
+void
+CueEditor::set_upper_toolbar_visible (bool visible)
+{
+	if (!_upper_toolbar) {
+		return;
+	}
+
+	if (visible) {
+		_upper_toolbar->show ();
+	} else {
+		_upper_toolbar->hide ();
+	}
 }
 
 void

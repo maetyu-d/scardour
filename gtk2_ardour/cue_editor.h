@@ -123,6 +123,7 @@ class CueEditor : public EditingContext, public PBD::HistoryOwner
 	bool ruler_event (GdkEvent*);
 
 	virtual void set_show_source (bool);
+	void set_upper_toolbar_visible (bool);
 	virtual void set_region (std::shared_ptr<ARDOUR::Region>);
 	virtual void set_track (std::shared_ptr<ARDOUR::Track>);
 	virtual void set_trigger (ARDOUR::TriggerReference&);
@@ -153,6 +154,7 @@ class CueEditor : public EditingContext, public PBD::HistoryOwner
 	ArdourWidgets::EventBoxExt _contents;
 	Gtk::HBox                  _hpacker;
 	Gtk::VBox                  _toolbox;
+	Gtk::Widget*               _upper_toolbar = nullptr;
 	Gtk::HBox                   button_bar;
 	Gtk::HScrollbar*           _canvas_hscrollbar;
 

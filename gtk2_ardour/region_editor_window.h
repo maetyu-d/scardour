@@ -18,8 +18,15 @@
 
 #pragma once
 
+#include <ytkmm/box.h>
+#include <ytkmm/button.h>
+#include <ytkmm/label.h>
+#include <ytkmm/paned.h>
+#include <ytkmm/separator.h>
+
 #include "ardour_window.h"
 
+class AudioClipEditor;
 class RegionEditor;
 class RegionView;
 
@@ -35,5 +42,24 @@ protected:
 	void on_unmap ();
 
 private:
-	RegionEditor* _region_editor;
+	Gtk::VBox    _contents;
+	Gtk::HBox    _toolbar_box;
+	Gtk::HBox    _toolbar_left;
+	Gtk::HBox    _toolbar_right;
+	Gtk::Label   _toolbar_spacer;
+	Gtk::HSeparator _toolbar_separator;
+	Gtk::VPaned  _editor_pane;
+	Gtk::Button  _undo_button;
+	Gtk::Button  _redo_button;
+	Gtk::Button  _play_button;
+	Gtk::Button  _loop_button;
+	Gtk::Button  _trim_button;
+	Gtk::Button  _silence_button;
+	Gtk::Button  _page_left_button;
+	Gtk::Button  _page_right_button;
+	Gtk::Button  _zoom_out_button;
+	Gtk::Button  _zoom_fit_button;
+	Gtk::Button  _zoom_in_button;
+	AudioClipEditor* _audio_clip_editor = nullptr;
+	RegionEditor*    _region_editor     = nullptr;
 };

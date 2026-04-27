@@ -51,6 +51,7 @@
 #include "control_point.h"
 #include "editor.h"
 #include "keyboard.h"
+#include "public_editor.h"
 #include "region_view.h"
 #include "timers.h"
 #include "ui_config.h"
@@ -76,6 +77,7 @@ AudioClipEditor::ClipMetric::get_marks (std::vector<ArdourCanvas::Ruler::Mark>& 
 AudioClipEditor::AudioClipEditor (std::string const & name, bool with_transport)
 	: CueEditor (name, with_transport)
 	, overlay_text (nullptr)
+	, selection_rect (nullptr)
 	, clip_metric (nullptr)
 	, scroll_fraction (0)
 {
@@ -173,6 +175,7 @@ AudioClipEditor::build_canvas ()
 
 	_canvas.set_background_color (UIConfiguration::instance().color ("arrange base"));
 	_canvas.signal_event().connect (sigc::mem_fun (*this, &CueEditor::canvas_pre_event), false);
+	_canvas.signal_event().connect (sigc::mem_fun (*this, &AudioClipEditor::event_handler), false);
 	_canvas.use_nsglview (UIConfiguration::instance().get_nsgl_view_mode () == NSGLHiRes);
 
 	_canvas.PreRender.connect (sigc::mem_fun(*this, &EditingContext::pre_render));
@@ -250,6 +253,12 @@ AudioClipEditor::build_canvas ()
 
 	line_container = new ArdourCanvas::Container (data_group);
 	CANVAS_DEBUG_NAME (line_container, "audio clip line container");
+
+	selection_rect = new ArdourCanvas::Rectangle (data_group, ArdourCanvas::Rect (0.0, 0.0, 0.0, 0.0));
+	selection_rect->hide ();
+	selection_rect->set_outline_color (UIConfiguration::instance().color ("rubber band rect"));
+	selection_rect->set_fill_color (UIConfiguration::instance().color_mod ("rubber band rect", "selection rect"));
+	CANVAS_DEBUG_NAME (selection_rect, "audio clip selection rect");
 
 	start_line = new StartBoundaryRect (line_container);
 	start_line->set_outline_what (ArdourCanvas::Rectangle::RIGHT);
@@ -418,7 +427,202 @@ AudioClipEditor::key_press (GdkEventKey* ev)
 {
 	EC_LOCAL_TEMPO_SCOPE;
 
+	if (Gtkmm2ext::Keyboard::modifier_state_contains (ev->state, Gtkmm2ext::Keyboard::PrimaryModifier)) {
+		switch (ev->keyval) {
+		case GDK_z:
+		case GDK_Z:
+			if (ev->state & GDK_SHIFT_MASK) {
+				redo_edit ();
+			} else {
+				undo_edit ();
+			}
+			return true;
+		case GDK_r:
+		case GDK_R:
+			redo_edit ();
+			return true;
+		default:
+			break;
+		}
+	}
+
+	switch (ev->keyval) {
+	case GDK_plus:
+	case GDK_equal:
+	case GDK_KP_Add:
+		zoom_in_detail ();
+		return true;
+	case GDK_minus:
+	case GDK_KP_Subtract:
+		zoom_out_detail ();
+		return true;
+	case GDK_0:
+	case GDK_KP_0:
+		fit_region ();
+		return true;
+	case GDK_z:
+	case GDK_Z:
+		zoom_to_selection ();
+		return true;
+	case GDK_t:
+	case GDK_T:
+		trim_to_selection ();
+		return true;
+	case GDK_Delete:
+	case GDK_BackSpace:
+		silence_selection ();
+		return true;
+	case GDK_l:
+	case GDK_L:
+		loop_selection ();
+		return true;
+	case GDK_Left:
+		page_left ();
+		return true;
+	case GDK_Right:
+		page_right ();
+		return true;
+	case GDK_space:
+		play_from_selection ();
+		return true;
+	default:
+		break;
+	}
+
 	return false;
+}
+
+bool
+AudioClipEditor::event_handler (GdkEvent* ev)
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	switch (ev->type) {
+	case GDK_BUTTON_PRESS:
+		if (ev->button.button == 1) {
+			_selection_press_x = event_canvas_x (ev);
+			_selection_start_sample = sample_at_view_x (_selection_press_x);
+			_selection_end_sample = _selection_start_sample;
+			_selecting = true;
+			selection_rect->hide ();
+			_playhead_cursor->set_position (_selection_start_sample);
+			if (_session && _region) {
+				_session->request_locate (timeline_sample_from_source_sample (_selection_start_sample), false);
+			}
+		}
+		break;
+	case GDK_2BUTTON_PRESS:
+		if (ev->button.button == 1) {
+			zoom_around (event_canvas_x (ev), true);
+			return true;
+		}
+		break;
+	case GDK_SCROLL: {
+		const double x = event_canvas_x (ev);
+		const guint state = ev->scroll.state;
+		if (state & GDK_SHIFT_MASK || ev->scroll.direction == GDK_SCROLL_LEFT || ev->scroll.direction == GDK_SCROLL_RIGHT) {
+			if (ev->scroll.direction == GDK_SCROLL_UP || ev->scroll.direction == GDK_SCROLL_LEFT) {
+				page_left ();
+			} else {
+				page_right ();
+			}
+			return true;
+		}
+
+		if (ev->scroll.direction == GDK_SCROLL_UP) {
+			zoom_around (x, true);
+			return true;
+		}
+		if (ev->scroll.direction == GDK_SCROLL_DOWN) {
+			zoom_around (x, false);
+			return true;
+		}
+		break;
+	}
+	case GDK_KEY_PRESS:
+		return key_press (&ev->key);
+	case GDK_MOTION_NOTIFY:
+		if (_selecting && (ev->motion.state & GDK_BUTTON1_MASK)) {
+			const double x = event_canvas_x (ev);
+			_selection_end_sample = sample_at_view_x (x);
+			if (fabs (x - _selection_press_x) > 3.0) {
+				update_selection_rect ();
+			}
+			return true;
+		}
+		break;
+	case GDK_BUTTON_RELEASE:
+		if (ev->button.button == 1 && _selecting) {
+			const double x = event_canvas_x (ev);
+			_selection_end_sample = sample_at_view_x (x);
+			_selecting = false;
+			if (fabs (x - _selection_press_x) <= 3.0) {
+				clear_selection_rect ();
+			} else {
+				update_selection_rect ();
+			}
+			return true;
+		}
+		break;
+	default:
+		break;
+	}
+
+	return false;
+}
+
+double
+AudioClipEditor::event_canvas_x (GdkEvent* ev) const
+{
+	switch (ev->type) {
+	case GDK_BUTTON_PRESS:
+	case GDK_2BUTTON_PRESS:
+	case GDK_3BUTTON_PRESS:
+	case GDK_BUTTON_RELEASE:
+		return ev->button.x;
+	case GDK_MOTION_NOTIFY:
+		return ev->motion.x;
+	case GDK_SCROLL:
+		return ev->scroll.x;
+	default:
+		return 0.0;
+	}
+}
+
+samplepos_t
+AudioClipEditor::sample_at_view_x (double x) const
+{
+	const double canvas_x = std::max<double> (0.0, x - _timeline_origin);
+	return _leftmost_sample + llrint (canvas_x * samples_per_pixel);
+}
+
+samplepos_t
+AudioClipEditor::timeline_sample_from_source_sample (samplepos_t source_sample) const
+{
+	if (!_region) {
+		return source_sample;
+	}
+
+	const samplepos_t region_start_in_source = _region->start().samples();
+	if (source_sample <= region_start_in_source) {
+		return _region->position().samples();
+	}
+
+	return _region->position().samples() + (source_sample - region_start_in_source);
+}
+
+samplepos_t
+AudioClipEditor::source_sample_from_timeline_sample (samplepos_t timeline_sample) const
+{
+	if (!_region) {
+		return timeline_sample;
+	}
+
+	if (timeline_sample <= _region->position().samples()) {
+		return _region->start().samples();
+	}
+
+	return _region->start().samples() + (timeline_sample - _region->position().samples());
 }
 
 void
@@ -436,6 +640,81 @@ AudioClipEditor::position_lines ()
 	start_line->set (ArdourCanvas::Rect (0., 0., start_x1, _visible_canvas_height));
 	end_line->set_position (ArdourCanvas::Duple (end_x0, 0.));
 	end_line->set (ArdourCanvas::Rect (0., 0., ArdourCanvas::COORD_MAX, _visible_canvas_height));
+
+	if (_selection_start_sample != _selection_end_sample) {
+		update_selection_rect ();
+	}
+
+	update_loop_rect ();
+}
+
+void
+AudioClipEditor::update_selection_rect ()
+{
+	const samplepos_t a = std::min (_selection_start_sample, _selection_end_sample);
+	const samplepos_t b = std::max (_selection_start_sample, _selection_end_sample);
+	const double x0 = sample_to_pixel_unrounded (a);
+	const double x1 = sample_to_pixel_unrounded (b);
+	double waveform_top = n_timebars * timebar_height;
+	double waveform_bottom = _visible_canvas_height;
+
+	if (!waves.empty ()) {
+		waveform_top = waves.front()->position ().y;
+		waveform_bottom = waves.back()->position ().y + waves.back()->height ();
+	}
+
+	selection_rect->set (ArdourCanvas::Rect (x0, waveform_top, x1, waveform_bottom));
+	selection_rect->show ();
+}
+
+void
+AudioClipEditor::clear_selection_rect ()
+{
+	_selection_start_sample = 0;
+	_selection_end_sample = 0;
+	selection_rect->hide ();
+}
+
+void
+AudioClipEditor::update_loop_rect ()
+{
+	if (!_session) {
+		transport_loop_range_rect->hide ();
+		return;
+	}
+
+	Location* tll = _session->locations()->auto_loop_location ();
+	if (_session->get_play_loop() && tll) {
+		const samplepos_t s1 = source_sample_from_timeline_sample (tll->start_sample ());
+		const samplepos_t s2 = source_sample_from_timeline_sample (tll->end_sample ());
+		const double x1 = sample_to_pixel (s1);
+		const double x2 = sample_to_pixel (s2);
+		transport_loop_range_rect->set_x0 (x1);
+		transport_loop_range_rect->set_x1 (x2);
+		transport_loop_range_rect->show ();
+	} else {
+		transport_loop_range_rect->hide ();
+	}
+}
+
+void
+AudioClipEditor::zoom_around (double x, bool zoom_in)
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	const samplecnt_t current = std::max<samplecnt_t> (1, get_current_zoom ());
+	const samplecnt_t target  = zoom_in ? std::max<samplecnt_t> (1, current / 2) : std::max<samplecnt_t> (1, current * 2);
+
+	if (target == current) {
+		return;
+	}
+
+	const double canvas_x = std::max<double> (0.0, x - _timeline_origin);
+	const samplepos_t anchor = _leftmost_sample + llrint (canvas_x * current);
+	const samplepos_t target_left = (anchor > llrint (canvas_x * target)) ? anchor - llrint (canvas_x * target) : 0;
+
+	reset_zoom (target);
+	reset_x_origin (target_left);
 }
 
 void
@@ -512,6 +791,7 @@ AudioClipEditor::set_region (std::shared_ptr<Region> region)
 		wv->set_channel (0);
 		wv->set_show_zero_line (false);
 		wv->set_clip_level (1.0);
+		wv->set_amplitude_above_axis (0.82);
 		wv->lower_to_bottom ();
 
 		waves.push_back (wv);
@@ -527,12 +807,12 @@ AudioClipEditor::set_region (std::shared_ptr<Region> region)
 	set_session (&r->session ());
 	state_connection.disconnect ();
 
+	maybe_set_from_rsu (region->id());
+
 	PBD::PropertyChange interesting_stuff;
 	region_changed (interesting_stuff);
 
 	region->PropertyChanged.connect (state_connection, invalidator (*this), std::bind (&AudioClipEditor::region_changed, this, _1), gui_context ());
-
-	maybe_set_from_rsu (region->id());
 }
 
 void
@@ -553,11 +833,20 @@ AudioClipEditor::canvas_allocate (Gtk::Allocation& alloc)
 	position_lines ();
 	update_fixed_rulers ();
 
-	start_line->set_y1 (_visible_canvas_height - 2.);
-	end_line->set_y1 (_visible_canvas_height - 2.);
-	// loop_line->set_y1 (_visible_canvas_height - 2.);
-
 	set_wave_heights ();
+
+	double waveform_top = n_timebars * timebar_height;
+	double waveform_bottom = _visible_canvas_height;
+	if (!waves.empty ()) {
+		waveform_top = waves.front()->position ().y;
+		waveform_bottom = waves.back()->position ().y + waves.back()->height ();
+	}
+
+	selection_rect->set_y0 (waveform_top);
+	selection_rect->set_y1 (waveform_bottom);
+	start_line->set_y1 (waveform_bottom - 2.);
+	end_line->set_y1 (waveform_bottom - 2.);
+	// loop_line->set_y1 (waveform_bottom - 2.);
 
 	catch_pending_show_region ();
 
@@ -585,11 +874,13 @@ AudioClipEditor::set_wave_heights ()
 
 	uint32_t       n  = 0;
 	const Distance w  = _visible_canvas_height - (n_timebars * timebar_height);
-	Distance       ht = w / waves.size ();
+	Distance       lane_height = w / waves.size ();
+	Distance       ht = lane_height * 0.88;
+	Distance       lane_padding = (lane_height - ht) * 0.5;
 
 	for (auto& wave : waves) {
 		wave->set_height (ht);
-		wave->set_y_position ((n_timebars * timebar_height) + (n * ht));
+		wave->set_y_position ((n_timebars * timebar_height) + (n * lane_height) + lane_padding);
 		++n;
 	}
 }
@@ -624,7 +915,38 @@ void
 AudioClipEditor::region_changed (const PBD::PropertyChange& what_changed)
 {
 	EC_LOCAL_TEMPO_SCOPE;
+	if (!_region) {
+		return;
+	}
 
+	const bool geometry_changed =
+		what_changed.empty () ||
+		what_changed.contains (ARDOUR::Properties::start) ||
+		what_changed.contains (ARDOUR::Properties::length);
+
+	const bool position_changed =
+		what_changed.empty () ||
+		what_changed.contains (ARDOUR::Properties::length);
+
+	if (geometry_changed && _visible_canvas_width > 0) {
+		const samplepos_t start = _region->start().samples ();
+		const samplecnt_t len = std::max<samplecnt_t> (1, _region->length().samples ());
+		const samplecnt_t spp = std::max<samplecnt_t> (1, (samplecnt_t) floor ((double) len / _visible_canvas_width));
+		reposition_and_zoom (start, spp);
+		instant_save ();
+	} else if (position_changed) {
+		position_lines ();
+	}
+
+	if (has_selection ()) {
+		const samplepos_t body_a = _region->start().samples ();
+		const samplepos_t body_b = _region->start().samples () + _region->length().samples ();
+		const samplepos_t sel_a = std::min (_selection_start_sample, _selection_end_sample);
+		const samplepos_t sel_b = std::max (_selection_start_sample, _selection_end_sample);
+		if (sel_b <= body_a || sel_a >= body_b) {
+			clear_selection_rect ();
+		}
+	}
 }
 
 void
@@ -814,11 +1136,11 @@ AudioClipEditor::maybe_update ()
 		}
 
 		samplepos_t pos = _session->transport_sample();
-		samplepos_t spos = _region->source_position().samples();
+		samplepos_t spos = _region->position().samples();
 		if (pos < spos) {
 			_playhead_cursor->set_position (0);
 		} else {
-			_playhead_cursor->set_position (pos - spos);
+			_playhead_cursor->set_position (source_sample_from_timeline_sample (pos));
 		}
 
 	} else {
@@ -915,4 +1237,233 @@ AudioClipEditor::instant_save ()
 	RegionUISettings rus;
 	initialize_region_ui_settings (rus);
 	add_region_ui_settings (_region->id(), rus);
+}
+
+void
+AudioClipEditor::zoom_in_detail ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	reset_zoom (std::max<samplecnt_t> (1, get_current_zoom () / 2));
+}
+
+void
+AudioClipEditor::zoom_out_detail ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	reset_zoom (std::max<samplecnt_t> (1, get_current_zoom () * 2));
+}
+
+void
+AudioClipEditor::fit_region ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	full_zoom_clicked ();
+}
+
+void
+AudioClipEditor::page_left ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	const samplecnt_t step = std::max<samplecnt_t> (1, current_page_samples () / 2);
+	if (_leftmost_sample <= step) {
+		reset_x_origin (0);
+		return;
+	}
+
+	reset_x_origin (_leftmost_sample - step);
+}
+
+void
+AudioClipEditor::page_right ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	const samplecnt_t step = std::max<samplecnt_t> (1, current_page_samples () / 2);
+	const auto        extent = max_zoom_extent ();
+	const samplecnt_t visible = current_page_samples ();
+	const samplepos_t limit = std::max<samplepos_t> (0, extent.second.samples () - visible);
+
+	reset_x_origin (std::min<samplepos_t> (limit, _leftmost_sample + step));
+}
+
+void
+AudioClipEditor::zoom_to_selection ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	if (!has_selection ()) {
+		fit_region ();
+		return;
+	}
+
+	const samplepos_t a = std::min (_selection_start_sample, _selection_end_sample);
+	const samplepos_t b = std::max (_selection_start_sample, _selection_end_sample);
+	const samplecnt_t len = std::max<samplecnt_t> (1, b - a);
+
+	reposition_and_zoom (a, std::max<samplecnt_t> (1, (samplecnt_t) floor ((max_extents_scale () * len) / (double) _track_canvas_width)));
+}
+
+void
+AudioClipEditor::play_from_selection ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	if (!_session || !_region) {
+		return;
+	}
+
+	const samplepos_t start = has_selection () ? std::min (_selection_start_sample, _selection_end_sample) : _playhead_cursor->current_sample ();
+	_session->request_locate (timeline_sample_from_source_sample (start), true, MustRoll);
+}
+
+void
+AudioClipEditor::trim_to_selection ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	std::shared_ptr<Region> r (_region);
+	if (ref.trigger()) {
+		r = ref.trigger()->the_region();
+	}
+
+	std::shared_ptr<AudioRegion> ar = std::dynamic_pointer_cast<AudioRegion> (r);
+	if (!ar || !has_selection ()) {
+		return;
+	}
+
+	const samplepos_t sel_a = std::min (_selection_start_sample, _selection_end_sample);
+	const samplepos_t sel_b = std::max (_selection_start_sample, _selection_end_sample);
+	const samplepos_t body_a = ar->start().samples ();
+	const samplepos_t body_b = ar->start().samples () + ar->length().samples ();
+	const samplepos_t clip_a = std::max (sel_a, body_a);
+	const samplepos_t clip_b = std::min (sel_b, body_b);
+
+	if (clip_b <= clip_a) {
+		return;
+	}
+
+	PublicEditor& editor = PublicEditor::instance ();
+	editor.begin_reversible_command (_("trim region to selection"));
+	r->clear_changes ();
+	r->trim_front (timepos_t (r->source_position().samples () + clip_a));
+	r->trim_end (timepos_t (r->source_position().samples () + clip_b));
+	editor.add_command (new PBD::StatefulDiffCommand (r));
+	editor.commit_reversible_command ();
+
+	clear_selection_rect ();
+}
+
+void
+AudioClipEditor::silence_selection ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	std::shared_ptr<Region> r (_region);
+	if (ref.trigger()) {
+		r = ref.trigger()->the_region();
+	}
+
+	std::shared_ptr<AudioRegion> ar = std::dynamic_pointer_cast<AudioRegion> (r);
+	if (!ar || !has_selection ()) {
+		return;
+	}
+
+	const samplepos_t sel_a = std::min (_selection_start_sample, _selection_end_sample);
+	const samplepos_t sel_b = std::max (_selection_start_sample, _selection_end_sample);
+	const samplepos_t body_a = ar->start().samples ();
+	const samplepos_t body_b = ar->start().samples () + ar->length().samples ();
+
+	const samplepos_t clip_a = std::max (sel_a, body_a);
+	const samplepos_t clip_b = std::min (sel_b, body_b);
+
+	if (clip_b <= clip_a) {
+		return;
+	}
+
+	const samplepos_t local_a = clip_a - body_a;
+	const samplepos_t local_b = clip_b - body_a;
+	const samplepos_t region_len = ar->length().samples ();
+
+	std::shared_ptr<AutomationList> env = ar->envelope ();
+	if (!env) {
+		return;
+	}
+
+	PublicEditor& editor = PublicEditor::instance ();
+	editor.begin_reversible_command (_("silence region selection"));
+	r->clear_changes ();
+
+	ar->set_envelope_active (true);
+	if (env->empty ()) {
+		ar->set_default_envelope ();
+	}
+
+	const samplepos_t pre = (local_a > 0) ? (local_a - 1) : local_a;
+	const samplepos_t post = (local_b < region_len) ? std::min<samplepos_t> (region_len, local_b + 1) : local_b;
+	const double pre_val = env->eval (timepos_t (pre));
+	const double post_val = env->eval (timepos_t (post));
+
+	env->freeze ();
+	env->clear (timepos_t (local_a), timepos_t (local_b));
+	if (local_a > 0) {
+		env->fast_simple_add (timepos_t (pre), pre_val);
+	}
+	env->fast_simple_add (timepos_t (local_a), 0.0);
+	env->fast_simple_add (timepos_t (local_b), 0.0);
+	if (local_b < region_len) {
+		env->fast_simple_add (timepos_t (post), post_val);
+	}
+	env->thaw ();
+
+	editor.add_command (new PBD::StatefulDiffCommand (r));
+	editor.commit_reversible_command ();
+
+	clear_selection_rect ();
+}
+
+void
+AudioClipEditor::loop_selection ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	if (!_session || !_region || !has_selection ()) {
+		return;
+	}
+
+	const samplepos_t a = std::min (_selection_start_sample, _selection_end_sample);
+	const samplepos_t b = std::max (_selection_start_sample, _selection_end_sample);
+
+	if (b <= a) {
+		return;
+	}
+
+	const timepos_t start (timeline_sample_from_source_sample (a));
+	const timepos_t end (timeline_sample_from_source_sample (b));
+	PublicEditor::instance().set_loop_range (start, end, _("loop selection"));
+	_session->request_play_loop (true, true);
+	update_loop_rect ();
+}
+
+void
+AudioClipEditor::undo_edit ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	if (_session) {
+		_session->undo (1);
+	}
+}
+
+void
+AudioClipEditor::redo_edit ()
+{
+	EC_LOCAL_TEMPO_SCOPE;
+
+	if (_session) {
+		_session->redo (1);
+	}
 }

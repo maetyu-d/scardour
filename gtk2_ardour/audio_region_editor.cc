@@ -80,10 +80,9 @@ AudioRegionEditor::AudioRegionEditor (Session* s, AudioRegionView* arv)
 	_region_line.set_layout_ellipsize_width (PANGO_SCALE * 240);
 
 	Gtk::Table* gain_table = manage (new Gtk::Table ());
-	gain_table->set_homogeneous ();
-	gain_table->set_col_spacings (12);
-	gain_table->set_row_spacings (6);
-	gain_table->set_border_width (0);
+	gain_table->set_col_spacings (14);
+	gain_table->set_row_spacings (10);
+	gain_table->set_border_width (4);
 
 	_gain_entry.configure (_gain_adjustment, 0, 1);
 
@@ -95,13 +94,13 @@ AudioRegionEditor::AudioRegionEditor (Session* s, AudioRegionView* arv)
 	gain_table->show_all ();
 
 	Gtk::HBox* b = Gtk::manage (new Gtk::HBox);
-	b->set_spacing (6);
+	b->set_spacing (8);
 	b->pack_start (_gain_entry);
 	b->pack_start (*Gtk::manage (new Gtk::Label (_("dB"))), false, false);
 	gain_table->attach (*b, 0, 2, row, row + 1, Gtk::FILL | Gtk::EXPAND, Gtk::FILL);
 
 	b = Gtk::manage (new Gtk::HBox);
-	b->set_spacing (6);
+	b->set_spacing (8);
 	b->pack_start (_peak_amplitude);
 	b->pack_start (*Gtk::manage (new Gtk::Label (_("dBFS"))), false, false);
 	gain_table->attach (*b, 2, 4, row, row + 1, Gtk::FILL | Gtk::EXPAND, Gtk::FILL);

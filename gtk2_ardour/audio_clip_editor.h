@@ -136,10 +136,23 @@ public:
 	void hide_overlay_text ();
 	void show_overlay_text ();
 	void instant_save ();
+	void zoom_in_detail ();
+	void zoom_out_detail ();
+	void fit_region ();
+	void page_left ();
+	void page_right ();
+	void zoom_to_selection ();
+	void play_from_selection ();
+	void trim_to_selection ();
+	void silence_selection ();
+	void loop_selection ();
+	void undo_edit ();
+	void redo_edit ();
 
  private:
 	ArdourCanvas::Container*         line_container;
 	ArdourCanvas::Text* overlay_text;
+	ArdourCanvas::Rectangle* selection_rect;
 	StartBoundaryRect*               start_line;
 	EndBoundaryRect*                 end_line;
 	ArdourCanvas::Line*              loop_line;
@@ -165,11 +178,24 @@ public:
 	double                                 non_wave_height;
 	samplepos_t                            left_origin;
 	double                                 scroll_fraction;
+	bool                                   _selecting = false;
+	double                                 _selection_press_x = 0.0;
+	samplepos_t                            _selection_start_sample = 0;
+	samplepos_t                            _selection_end_sample = 0;
 
 	void scroll_left ();
 	void scrol_right ();
 
 	bool event_handler (GdkEvent* ev);
+	double event_canvas_x (GdkEvent* ev) const;
+	samplepos_t sample_at_view_x (double x) const;
+	samplepos_t timeline_sample_from_source_sample (samplepos_t source_sample) const;
+	samplepos_t source_sample_from_timeline_sample (samplepos_t timeline_sample) const;
+	bool has_selection () const { return _selection_start_sample != _selection_end_sample; }
+	void update_selection_rect ();
+	void clear_selection_rect ();
+	void update_loop_rect ();
+	void zoom_around (double x, bool zoom_in);
 	bool start_line_event_handler (GdkEvent* ev, StartBoundaryRect*);
 	bool end_line_event_handler (GdkEvent* ev, EndBoundaryRect*);
 	void drop_waves ();
